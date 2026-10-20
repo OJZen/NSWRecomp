@@ -296,4 +296,3 @@ static int zelda_gpu_depth_clear(const p_clear_ds *clear) {
     args_dirty_all(); g_pso_dirty = g_dss_dirty = 1;
     return 1;
 }
-

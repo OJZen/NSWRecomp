@@ -1,0 +1,5 @@
+# Source fingerprints must survive checkouts with different line-ending settings.
+third_party/** -text
+# Preserve upstream bytes, including their existing whitespace.
+third_party/zelda-mobile/core/third_party/** -whitespace
+tools/hactool.patch -text -whitespace

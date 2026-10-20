@@ -10,7 +10,7 @@ class RepositoryTests(unittest.TestCase):
     def test_source_tree_excludes_local_inputs_and_outputs(self):
         result = subprocess.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
                                 cwd=ROOT, capture_output=True, check=True)
-        allowed_names = {'.gitignore', 'Makefile', 'LICENSE'}
+        allowed_names = {'.gitignore', '.gitattributes', 'Makefile', 'LICENSE'}
         allowed_suffixes = {'.c', '.h', '.inc', '.m', '.py', '.md', '.json', '.txt', '.cs', '.csproj', '.props', '.glsl', '.sh', '.toml', '.patch'}
         for raw in result.stdout.split(b'\0'):
             if not raw:

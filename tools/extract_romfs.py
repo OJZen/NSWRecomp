@@ -212,4 +212,3 @@ def extract(base, update, key_path, hactool, output, expected):
         os.link(merged, output)
         output.with_suffix('.json').write_text(json.dumps(record, indent=2) + '\n')
     print('Verified merged RomFS ready; temporary archives removed', flush=True)
-
