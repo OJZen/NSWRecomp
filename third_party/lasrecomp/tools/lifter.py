@@ -106,6 +106,42 @@ def set_reg(sf, r, expr, sp=False):
     return f'{dst} = (uint32_t)({expr});'
 
 
+def exclusive_pair_transaction(load, store, pc):
+    """Fuse an adjacent LDXP/STXP pair; the caller must exclude interior entry/patch sites."""
+    if load & 0x3fff0000 != 0x087f0000 or store & 0x3fe00000 != 0x08200000:
+        return None
+    size, n, t, t2 = bits(load, 30, 2), bits(load, 5, 5), bits(load, 0, 5), bits(load, 10, 5)
+    s, u, u2 = bits(store, 16, 5), bits(store, 0, 5), bits(store, 10, 5)
+    if (size < 2 or bits(store, 30, 2) != size or bits(store, 5, 5) != n
+            or t == t2 or (n != 31 and n in (t, t2))
+            or s in (u, u2) or (n != 31 and s == n)):
+        return None
+    width = 8 << size
+    scalar, pair = ('uint64_t', '__uint128_t') if size == 3 else ('uint32_t', 'uint64_t')
+    acquire, release = bits(load, 15, 1), bits(store, 15, 1)
+    read_order = '__ATOMIC_ACQUIRE' if acquire else '__ATOMIC_RELAXED'
+    order = ('__ATOMIC_ACQ_REL' if acquire else '__ATOMIC_RELEASE') if release else read_order
+
+    def source(reg):
+        if reg == 31:
+            return '0'
+        if reg == t:
+            return f'({scalar})old'
+        if reg == t2:
+            return f'({scalar})(old >> {width})'
+        return f'({scalar}){X(reg)}'
+
+    # The successful CAS is the linearization point for both guest instructions.
+    return (f'{{ uint64_t ea = {XS(n)}; if (ea & {width // 4 - 1}) rt_udf(c, {hx(pc)}); '
+            f'{pair} *p = ({pair} *)(uintptr_t)ea; '
+            f'{pair} old = __atomic_load_n(p, {read_order}), desired; '
+            f'do {{ desired = ({pair})({source(u)}) | (({pair})({source(u2)}) << {width}); }} '
+            f'while (!__atomic_compare_exchange_n(p, &old, desired, 0, {order}, {read_order})); '
+            f'{set_reg(size == 3, t, f"({scalar})old")} '
+            f'{set_reg(size == 3, t2, f"({scalar})(old >> {width})")} '
+            f'{set_reg(0, s, "0")} c->excl_addr = ~0ull; c->excl_size = 0; }}')
+
+
 def shift_expr(sf, val, typ, amt):
     if amt == 0 and typ != 3:
         return val
@@ -323,7 +359,7 @@ class Lifter:
                 return Insn('op', '/* hint */')
             if crn == 3 and op1 == 3 and rt == 31:  # barriers
                 if op2 == 2:
-                    return Insn('op', 'c->excl_addr = ~0ull;')
+                    return Insn('op', 'c->excl_addr = ~0ull; c->excl_size = 0;')
                 return Insn('op', '__atomic_thread_fence(__ATOMIC_SEQ_CST);')
             raise Unsupported(f'pstate/system {w:08x}')
         if op0 == 1:  # SYS

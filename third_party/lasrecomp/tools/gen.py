@@ -19,7 +19,7 @@ import unicorn as uc
 from unicorn import arm64_const as A
 
 from analyze import eh_frame_functions
-from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, hx, sext
+from lifter import Insn, Lifter, Unsupported, bits, emit_asm_batch, exclusive_pair_transaction, hx, sext
 from nso import Nso, R_AARCH64_RELATIVE
 
 SCRATCH_MEM = 0x7300000000
@@ -407,7 +407,10 @@ class Module:
                         raise ValueError(f'hook {a:#x}: target {t:#x} is outside its function')
                     labels.add(t)
         last = None
+        fused_tail = None
         for a in range(entry, end, 4):
+            if a == fused_tail:
+                continue
             ins = self.lift(a)
             if a in labels:
                 flush()
@@ -440,6 +443,16 @@ class Module:
                 out.append('    ' + self.patches[a](self, a))
                 last = 'op'
                 continue
+            if (a + 4 < end and a + 4 not in labels and a + 4 not in self.patches
+                    and a + 4 not in self.hooks and a + 4 - self.base not in self.rando_code):
+                transaction = exclusive_pair_transaction(self.word(a), self.word(a + 4), a)
+                if transaction:
+                    flush()
+                    out.append('    ' + transaction)
+                    self.unsupported.difference_update((a, a + 4))
+                    self.stats['exclusive_pair_transactions'] += 1
+                    fused_tail, last = a + 4, 'op'
+                    continue
             k = ins.kind
             if k == 'asm':
                 if len(batch) >= 24:
@@ -659,7 +672,9 @@ def main():
         f.write('};\n')
         f.write(f'const uint64_t {args.name}_fn_count = {len(order)};\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_table.c'), f.getvalue())
-    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
+    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total; '
+          f'exclusive pair transactions {m.stats["exclusive_pair_transactions"]}, '
+          f'unsupported remaining {len(m.unsupported)}', file=sys.stderr)
 
 
 if __name__ == '__main__':

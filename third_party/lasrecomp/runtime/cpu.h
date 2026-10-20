@@ -16,7 +16,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     void *thread;            // 312: runtime thread object
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
-    uint8_t _pad[512 - 336];
+    uint64_t excl_size;      // 336: a store-exclusive must match the load's width
+    uint8_t _pad[512 - 344];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -74,16 +75,20 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 #define ST64(a, v) (*(u64u *)(uintptr_t)(a) = (uint64_t)(v))
 
 // ---- exclusive monitor (emulated with compare-and-swap)
+// shortcut: standalone LL/SC cannot detect ABA writes; use a proven fused transaction where possible.
 #define EXCL(N, T)                                                                         \
     static inline uint64_t ldx##N(Cpu *c, uint64_t a) {                                    \
         T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
+        c->excl_size = N;                                                                  \
         return v;                                                                          \
     }                                                                                      \
     static inline uint32_t stx##N(Cpu *c, uint64_t a, uint64_t v) {                        \
-        if (c->excl_addr != a) return 1;                                                   \
+        int valid = c->excl_addr == a && c->excl_size == N;                                \
         c->excl_addr = ~0ull;                                                              \
+        c->excl_size = 0;                                                                  \
+        if (!valid) return 1;                                                              \
         T expected = (T)c->excl_val;                                                       \
         return !__atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,         \
                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);           \

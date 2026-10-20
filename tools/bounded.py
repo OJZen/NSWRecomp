@@ -65,3 +65,23 @@ def run(command, *, cwd, log, seconds=900, rss_limit=1536 << 20, reserve=20 << 3
             process.wait()
     return {'seconds': round(time.monotonic() - start, 3), 'peak_group_rss_bytes': peak,
             'rss_limit_bytes': rss_limit, 'free_space_reserve_bytes': reserve}
+
+
+if __name__ == '__main__':
+    import argparse
+    import json
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--log', type=Path, required=True)
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command:
+        parser.error('a command is required')
+    args.log.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        print(json.dumps(run(command, cwd=Path.cwd(), log=args.log)))
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        parser.exit(1, f'{error}\n')
+    finally:
+        if args.log.is_file():
+            print(args.log.read_text(), end='')
