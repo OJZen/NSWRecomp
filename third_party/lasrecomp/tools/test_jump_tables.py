@@ -19,7 +19,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 
 class JumpTableTests(unittest.TestCase):
-    def check_table(self, taken):
+    def check_table(self, taken, split_guard=False, prior_load=False):
         with tempfile.TemporaryDirectory(prefix='jump-table-') as temp:
             directory = Path(temp)
             if taken:
@@ -34,20 +34,26 @@ class JumpTableTests(unittest.TestCase):
                                 'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret',
                                 'mov w0, #99', 'ret']
                 branch, cases = 0x98, [0x9c, 0xa4, 0xac]
-            words = assemble(directory, instructions)
+            if split_guard:
+                instructions[3] = 'adr x2, .'
+                instructions[4] = 'ldrsw x3, [x1, x0, lsl #2]'
+                instructions[5] = 'add x2, x2, x3'
+            words = assemble(directory, (['ldrb w8, [x20, x21]'] if prior_load else []) + instructions)
             raw = fixture()
             struct.pack_into('<ii', raw, 0x150, -0x40, -0x40)
+            if prior_load: struct.pack_into('<I', raw, 0x17c, words.pop(0))
             struct.pack_into('<' + 'I' * len(words), raw, 0x180, *words)
             for offset in (0x500, 0x508, 0x6f8, 0x700):
-                struct.pack_into('<Q', raw, offset + 0x100, 0x80)
-            struct.pack_into('<3H', raw, 0x400, 0, 2, 4)
+                struct.pack_into('<Q', raw, offset + 0x100, cases[0] if split_guard and offset == 0x500 else 0x80)
+            if split_guard: struct.pack_into('<3i', raw, 0x400, 16, 24, 32)
+            else: struct.pack_into('<3H', raw, 0x400, 0, 2, 4)
             path = directory / 'synthetic.nso'
             path.write_bytes(raw)
             buffer = (ctypes.c_ubyte * 8192)()
             base = (ctypes.addressof(buffer) + 4095) & ~4095
             module = gen.Module('synthetic', path, base, 'c', game_patches=False)
             targets = [base + offset for offset in cases]
-            labels, external, tables = module.scan(base + 0x80, targets[0])
+            labels, external, tables = module.scan(base + (0x8c if split_guard else 0x80), targets[0])
             self.assertEqual(tables[base + branch], targets)
             self.assertTrue(set(targets) <= external)
             self.assertFalse(set(targets) & labels)
@@ -82,10 +88,17 @@ uint64_t rt_ticks(void) { abort(); }
                 self.assertEqual(native.run(value), expected)
             # Targets outside executable text are not accepted merely because they are aligned.
             broken = bytearray(raw)
-            struct.pack_into('<H', broken, 0x404, 0xffff)
+            if split_guard: struct.pack_into('<i', broken, 0x408, 0x1000)
+            else: struct.pack_into('<H', broken, 0x404, 0xffff)
             path.write_bytes(broken)
             invalid = gen.Module('synthetic', path, base, 'c', game_patches=False)
             self.assertIsNone(invalid.jump_table(base + branch, base + 0x80, targets[0]))
+
+    def test_existing_guard_ignores_unavailable_previous_partition_memory(self):
+        self.check_table(False, prior_load=True)
+
+    def test_signed_table_with_guard_in_previous_partition(self):
+        self.check_table(False, split_guard=True)
 
     def test_cross_partition_fallthrough_table(self):
         self.check_table(False)

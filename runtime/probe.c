@@ -27,7 +27,8 @@ volatile int g_fnprof = 0;
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr; (void)lr; (void)x0; }
 #endif
 static void stop(void) __attribute__((noreturn));
-static void stop(void) { fputs("probe reached unsupported runtime work\n", stderr); abort(); }
+static void stop(void) { fputs("probe reached unsupported runtime work\n", stderr); exit(78); }
+__attribute__((weak)) GuestFn rt_find_external(uint64_t address) { (void)address; return NULL; }
 GuestFn rt_find_function(uint64_t address) {
     for (unsigned t = 0; t < sizeof tables / sizeof *tables; t++) {
         uint64_t lo = 0, hi = *tables[t].count;
@@ -39,7 +40,7 @@ GuestFn rt_find_function(uint64_t address) {
         if (lo < *tables[t].count && tables[t].addresses[lo] == address)
             return tables[t].functions[lo];
     }
-    return NULL;
+    return rt_find_external(address);
 }
 void rt_dispatch(Cpu *c) {
     GuestFn function = rt_find_function(c->pc);

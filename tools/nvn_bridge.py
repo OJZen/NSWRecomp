@@ -32,13 +32,21 @@ def kind(type_name, kinds):
     return 'pointer' if '*' in type_name else kinds.get(type_name, 'unsupported')
 
 
-def generate(prototypes, header):
+def generate(prototypes, header, names=(), extra_header=None):
     kinds = types(header)
     functions = re.findall(r'typedef\s+([^;\n]+?)\s*\(\*NVNT_(\w+)\)\(([^;]*)\);', prototypes)
     if not functions or len({name for _, name, _ in functions}) != len(functions):
         raise ValueError('missing or duplicate NVN API prototypes')
+    known = {name for _, name, _ in functions}
+    for name in names:
+        if not re.fullmatch(r'nvn\w+', name): raise ValueError('invalid NVN name')
+        if name not in known:
+            functions.append(('unknown', name, 'void'))
+            known.add(name)
     code = ['#include "nvn_bridge.h"', '#include "nvn_protos.h"',
+            '_Thread_local Cpu *nvn_bridge_cpu;',
             '_Static_assert(sizeof(void *) == 8, "64-bit host required");']
+    if extra_header: code.append(f'#include "{extra_header}"')
     unsupported, small_types = [], set()
     for index, (result, name, parameters) in enumerate(functions):
         arguments = [] if parameters.strip() in ('', 'void') else [part.strip() for part in parameters.split(',')]
@@ -50,7 +58,8 @@ def generate(prototypes, header):
             code.extend([f'    nvn_bridge_unavailable(c, "{name}");', '}'])
             continue
         code.extend([f'    NVNT_{name} function = (NVNT_{name})nvn_bridge_native({index});',
-                     f'    if (!function) nvn_bridge_unavailable(c, "{name}");'])
+                     f'    if (!function) nvn_bridge_unavailable(c, "{name}");',
+                     '    Cpu *previous = nvn_bridge_cpu; nvn_bridge_cpu = c;'])
         integer = floating = stack = 0
         names = []
         for i, (argument, category) in enumerate(zip(arguments, argument_kinds)):
@@ -86,7 +95,7 @@ def generate(prototypes, header):
             else:
                 cast = '(uint32_t)' if result_kind == 'word' else '(uintptr_t)' if result_kind == 'pointer' else '(uint64_t)'
                 code.append(f'    c->x[0] = {cast}result;')
-        code.append('}')
+        code.extend(['    nvn_bridge_cpu = previous;', '}'])
     for name in sorted(small_types):
         code.append(f'_Static_assert(sizeof({name}) <= 8, "NVN one-register handle ABI");')
     code.append('const NvnBridgeEntry nvn_bridge_entries[] = {')

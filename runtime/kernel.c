@@ -1,6 +1,15 @@
 // Adapted from Zelda-Mobile host/kernel.c; Apache-2.0, see third_party/zelda-mobile/LICENSE.
 // Modified for recompiled CPU state and non-executable guest module mappings.
 #include "kernel.h"
+#include <stdatomic.h>
+
+typedef int (*FaultHook)(void *, int, void *);
+static _Atomic(FaultHook) fault_hook;
+void dm_fault_hook_register(FaultHook hook) { atomic_store(&fault_hook, hook); }
+bool kernel_handle_fault(void *address, int write, void *context) {
+    FaultHook hook = atomic_load(&fault_hook);
+    return hook && hook(address, write, context);
+}
 #include "threads.h"
 #include <pthread.h>
 #include <stdio.h>

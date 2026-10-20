@@ -15,6 +15,8 @@ import time
 from array import array
 from collections import Counter, OrderedDict
 
+import capstone
+from capstone import arm64_const as C
 import unicorn as uc
 from unicorn import arm64_const as A
 
@@ -57,6 +59,9 @@ class Module:
         self.patches, self.hooks, self.rando_code = load_game_patches() if game_patches else ({}, {}, {})
         self.stats = Counter()
         self.mu = None
+        self.function_spans = None
+        self.table_disasm = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_LITTLE_ENDIAN)
+        self.table_disasm.detail = True
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
@@ -107,10 +112,113 @@ class Module:
 
     def jump_table(self, br_pc, entry, end):
         """Resolve `br xN` targets from a bounds-checked jump table, or None."""
-        r = self._jump_table_fallthrough(br_pc, entry, end)
-        if r is None:
-            r = self._jump_table_taken(br_pc, entry, end)
-        return r
+        # Preserve a valid local context; earlier memory loads may not be emulatable.
+        starts = [entry]
+        earlier = max(self.lo, br_pc - 4 * 32)
+        if earlier < entry:
+            starts.append(earlier)
+        for start in starts:
+            r = self._jump_table_fallthrough(br_pc, start, end)
+            if r is None:
+                r = self._jump_table_taken(br_pc, start, end)
+            if r is not None:
+                return r
+        return self._state_table(br_pc, entry)
+
+    def _state_table(self, br_pc, entry):
+        """Infer a readonly relative table bounded by the original function's metadata."""
+        if not self.computed_target(br_pc, entry):
+            return None
+        if self.function_spans is None:
+            starts = sorted(self.base + a for a in eh_frame_functions(self.nso) if self.in_text(self.base + a))
+            spans = dict(zip(starts, starts[1:]))
+            for _, info, section, value, size in self.nso.syms:
+                a, end = self.base + value, self.base + value + size
+                if section and info & 15 == 2 and size and self.in_text(a) and a < end <= self.hi:
+                    spans[a] = min(spans.get(a, end), end)
+            self.function_spans = sorted(spans.items())
+            self.function_starts = [a for a, _ in self.function_spans]
+        index = bisect.bisect_right(self.function_starts, br_pc) - 1
+        if index < 0:
+            return None
+        low, high = self.function_spans[index]
+        if not low <= br_pc < high:
+            return None
+        start = max(low, br_pc - 4 * 32)
+        instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
+        if len(instructions) * 4 != br_pc - start:
+            return None
+        # A failed bounds-checked table must not become a guessed shorter table.
+        if any((self.word(i.address) & 0xFF000010) == 0x54000000 and
+               bits(self.word(i.address), 0, 4) in (2, 3, 8, 9) for i in instructions):
+            return None
+
+        def reg(register):
+            name = self.table_disasm.reg_name(register)
+            if name in ('fp', 'lr'): return 29 if name == 'fp' else 30
+            return int(name[1:]) if re.fullmatch('[xw][0-9]+', name or '') else None
+
+        def writer(register, before):
+            if register is None: return None
+            for i in range(before - 1, -1, -1):
+                instruction = instructions[i]
+                if instruction.group(capstone.CS_GRP_JUMP) or instruction.group(capstone.CS_GRP_CALL) or instruction.group(capstone.CS_GRP_RET):
+                    return None
+                if register in (reg(r) for r in instruction.regs_access()[1]):
+                    return i
+            return None
+
+        def constant(register, before):
+            i = writer(register, before)
+            if i is None: return None
+            instruction = instructions[i]
+            operands = instruction.operands
+            if instruction.id in (C.ARM64_INS_ADR, C.ARM64_INS_ADRP): return operands[1].imm
+            if (instruction.id == C.ARM64_INS_ADD and len(operands) == 3 and
+                    operands[2].type == C.ARM64_OP_IMM and operands[2].shift.value in (0, 12)):
+                value = constant(reg(operands[1].reg), i)
+                if value is not None:
+                    value = value + (operands[2].imm << operands[2].shift.value)
+                    return value & (0xffffffff if self.table_disasm.reg_name(operands[0].reg).startswith('w') else 0xffffffffffffffff)
+            return None
+
+        add_at = writer(bits(self.word(br_pc), 5, 5), len(instructions))
+        if add_at is None: return None
+        add = instructions[add_at]
+        operands = add.operands
+        if (add.id != C.ARM64_INS_ADD or len(operands) != 3 or
+                any(o.type != C.ARM64_OP_REG for o in operands) or
+                operands[2].ext not in (0, C.ARM64_EXT_UXTW, C.ARM64_EXT_SXTW) or
+                operands[2].shift.type not in (0, C.ARM64_SFT_LSL) or operands[2].shift.value > 3):
+            return None
+        case_base = constant(reg(operands[1].reg), add_at)
+        load_at = writer(reg(operands[2].reg), add_at)
+        if case_base is None or load_at is None: return None
+        load = instructions[load_at]
+        widths = {C.ARM64_INS_LDRB: 1, C.ARM64_INS_LDRH: 2, C.ARM64_INS_LDRSW: 4}
+        width = widths.get(load.id)
+        if not width or load.writeback or len(load.operands) != 2: return None
+        memory = load.operands[1]
+        if (memory.type != C.ARM64_OP_MEM or not memory.mem.index or memory.mem.disp or
+                memory.shift.type not in (0, C.ARM64_SFT_LSL) or 1 << memory.shift.value != width):
+            return None
+        table = constant(reg(memory.mem.base), load_at)
+        ro_start = self.base + self.nso.rodata[0]
+        ro_end = ro_start + self.nso.rodata[1]
+        if table is None or not ro_start <= table < ro_end or table % width: return None
+        targets = set()
+        for i in range(4096):
+            at = table + i * width
+            if at + width > ro_end: break
+            offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
+            target = case_base + (offset << operands[2].shift.value)
+            if not low <= target < high or not self.in_text(target): break
+            targets.add(target)
+        else:
+            return None
+        if len(targets) < 2: return None
+        self.stats['state_tables'] += 1
+        return sorted(targets)
 
     def _index_regs(self, start, at, idx):
         """The index register plus registers holding the same value in start..at: sources it was

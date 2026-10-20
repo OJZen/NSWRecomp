@@ -13,6 +13,7 @@ from bounded import run
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / 'third_party/lasrecomp'
 PROFILE = ROOT / 'config/totk-1.4.3.json'
+HLE_SYMBOLS = ROOT / 'runtime/hle_symbols.inc'
 sys.path.insert(0, str(VENDOR / 'tools'))
 from analyze import eh_frame_functions
 from nso import Nso
@@ -68,7 +69,21 @@ def inspect(exefs):
 def generation_inputs(info):
     sources = sorted((VENDOR / 'tools').glob('*.py'))
     return {'schema': 1, 'module': info, 'simd': 'c', 'game_patches': False,
-            'generator': {p.name: digest(p) for p in sources}, 'profile': digest(PROFILE)}
+            'generator': {p.name: digest(p) for p in sources}, 'profile': digest(PROFILE),
+            'hle_symbols': digest(HLE_SYMBOLS)}
+
+
+def hle_symbols():
+    names = []
+    for line in HLE_SYMBOLS.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('//'):
+            continue
+        match = re.fullmatch(r'HLE\(([A-Za-z_][A-Za-z0-9_]*)\)', line)
+        if not match or match[1] in names:
+            raise ValueError('invalid or duplicate host API symbol')
+        names.append(match[1])
+    return names
 
 
 def diagnostics(directory, name):
@@ -106,10 +121,12 @@ def generate(exefs, name):
             return old
     with tempfile.TemporaryDirectory(prefix=f'generate-{name}-') as temp:
         staged = Path(temp) / name
+        bindings = Path(temp) / 'hle.txt'
+        bindings.write_text('\n'.join(hle_symbols()) + '\n')
         log = ROOT / 'work/logs' / f'generate-{name}.log'
         metrics = run([sys.executable, str(VENDOR / 'tools/gen.py'), name, str(exefs / name),
                        info['base'], str(staged), '--simd', 'c', '--no-game-patches',
-                       '--cache-limit', '32768', '--chunk-bytes', '500000'], cwd=ROOT, log=log)
+                       '--cache-limit', '32768', '--chunk-bytes', '500000', '--hle', str(bindings)], cwd=ROOT, log=log)
         files = {p.name: digest(p) for p in sorted(staged.glob('*.c'))}
         result = {'inputs': inputs, 'files': files,
                   'generated_bytes': sum(p.stat().st_size for p in staged.glob('*.c')),
@@ -149,7 +166,7 @@ def probe(exefs):
     with tempfile.TemporaryDirectory(prefix='probe-') as temp:
         candidate = Path(temp) / library.name
         build = run(['clang', '-std=gnu11', '-O2', '-fPIC', '-shared', '-I', str(VENDOR / 'runtime'),
-                     *map(str, sources), str(ROOT / 'runtime/probe.c'), '-lm', '-o', str(candidate)],
+                     *map(str, sources), str(ROOT / 'runtime/probe.c'), str(ROOT / 'runtime/hle.c'), '-lm', '-o', str(candidate)],
                     cwd=ROOT, log=ROOT / 'work/logs/probe-build.log', seconds=120)
         result_path = Path(temp) / 'result.json'
         execution = run([sys.executable, str(ROOT / 'tools/probe_rtld.py'), '--exefs', str(exefs),

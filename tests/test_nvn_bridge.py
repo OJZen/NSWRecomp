@@ -29,6 +29,19 @@ typedef NVNopaque (*NVNT_unsupported)(void);
 
 
 class NvnBridgeTests(unittest.TestCase):
+    def test_guest_tokens_and_callback_state_isolation(self):
+        with tempfile.TemporaryDirectory(prefix='graphics-bridge-test-') as temp:
+            binary = Path(temp) / 'check'
+            subprocess.run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined',
+                            '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'runtime'),
+                            '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
+                            '-I', str(ROOT / 'runtime/graphics/include'), '-I', str(ROOT / 'runtime/graphics/nvn'),
+                            str(ROOT / 'runtime/graphics/bridge.c'), str(ROOT / 'tests/native_graphics_bridge.c'),
+                            '-o', str(binary)], check=True, capture_output=True, timeout=30)
+            for args, code in (([], 0), (['unbalanced'], 78)):
+                result = subprocess.run([str(binary), *args], capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, code, result.stderr)
+
     def test_real_api_header_compiles_with_explicit_unsupported_aggregates(self):
         source, unsupported = generate((HEADERS / 'nvn_protos.h').read_text(), (HEADERS / 'include/nvn.h').read_text())
         self.assertEqual(unsupported, ['nvnBufferBuilderGetMemoryPool', 'nvnTextureBuilderGetMemoryPool', 'nvnTextureGetMemoryPool'])

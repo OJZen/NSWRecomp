@@ -13,4 +13,6 @@ bool kernel_event_create(uint32_t *write_handle, uint32_t *read_handle);
 uint32_t kernel_event_copy(uint32_t read_handle);
 void dm_guest_write_prepare(void *address, size_t size);
 void dm_guest_write_prep_register(void (*hook)(void *, size_t));
+void dm_fault_hook_register(int (*hook)(void *, int, void *));
+bool kernel_handle_fault(void *address, int write, void *context);
 uint64_t kernel_thread_local(void);

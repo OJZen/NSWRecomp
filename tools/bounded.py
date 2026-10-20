@@ -40,7 +40,7 @@ def run(command, *, cwd, log, seconds=900, rss_limit=1536 << 20, reserve=20 << 3
             while process.poll() is None:
                 peak = max(peak, sample(process.pid))
                 if peak > rss_limit:
-                    raise RuntimeError('process group exceeded 1536 MiB RSS')
+                    raise RuntimeError(f'process group exceeded {rss_limit // (1 << 20)} MiB RSS (observed {peak // (1 << 20)} MiB)')
                 if time.monotonic() - start > seconds:
                     raise RuntimeError('process group exceeded its time budget')
                 if shutil.disk_usage(cwd).free < reserve:

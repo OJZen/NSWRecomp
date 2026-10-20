@@ -14,11 +14,12 @@ from recompile import ROOT, VENDOR, digest, generate, prepare_work, profile
 
 FLAGS = ['-std=gnu11', '-O1', '-g0', '-fPIC', '-fno-strict-aliasing']
 BUILD = ROOT / 'work/build'
-RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h')
+RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h', 'hle.c', 'hle_symbols.inc')
 
 
 def write_json(path, value):
     partial = path.with_suffix(path.suffix + '.partial')
+    if path.is_symlink() or partial.is_symlink(): raise ValueError('JSON output must not be a symlink')
     partial.write_text(json.dumps(value, indent=2) + '\n')
     partial.replace(path)
 
@@ -141,7 +142,7 @@ def build(exefs):
         response = BUILD / 'link.rsp'
         candidate = BUILD / 'link-probe.partial'
         command = ['clang', *FLAGS, '-DTOTK_LINK_ALL', '-I', str(VENDOR / 'runtime'),
-                   str(ROOT / 'runtime/probe.c'), str(ROOT / 'runtime/load.c'),
+                   *[str(ROOT / 'runtime' / name) for name in RUNTIME if name.endswith('.c')],
                    *map(str, objects), '-lm', '-o', str(candidate)]
         response.write_text(shlex.join(command[1:]) + '\n')
         try:

@@ -41,7 +41,29 @@ byte-for-byte from the same pinned source. `include/nvn.h` keeps its MIT notice,
 copyright 2020 h1k421; the generated prototype header is part of the d2r-mobile
 MIT subset. They describe the host interface and contain no game resources.
 
-The local Ryujinx/Ryubing (root MIT) and Eden (GPLv3-or-later) checkouts were
-reviewed as references only. No code from either is included or linked here.
-Pinned revisions, source locations, per-file license caveats and the intended
-reuse boundaries are recorded in [the reference review](docs/emulator-references.md).
+`runtime/graphics/` adapts the pinned Zelda-Mobile NVN/Metal backend and its
+committed fixes. Core graphics files inherit the d2r-mobile MIT license; host
+additions and shader preparation tools inherit Apache-2.0. The original ARM64
+entry trampolines and game-derived builtin shaders are excluded. CPU calls use
+typed bridges into compiled C, including callbacks. Per-file origins are in
+`third_party/zelda-mobile/SOURCE.json`.
+
+The shader tool now includes the same pinned MIT Ryujinx 1.3.2 subset used by
+Zelda-Mobile: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator`.
+Its notice is retained in `third_party/zelda-mobile/core/third_party/ryujinx/LICENSE.txt`.
+The bcdec texture decoder retains its MIT/Unlicense notice in
+`third_party/zelda-mobile/core/third_party/bcdec/LICENSE`. Its shaders are generic
+format/driver helpers; user shader captures, translations and caches stay in `work/`.
+SPIRV-Cross is fetched at a pinned commit with its Apache-2.0 notice under
+`work/tools/spirv-cross.LICENSE`; the pinned .NET SDK is installed separately in `work/tools/`.
+
+The container importer adapts Zelda-Mobile's ExeFS/NCZ and RomFS preparation tools
+under Apache-2.0. Its hactool patch derives from SciresM/hactool, ISC; that notice
+is retained in `third_party/hactool/LICENSE`. The fixed hactool build retains its
+ISC and bundled mbedTLS Apache-2.0 licenses under `work/tools/`. AES uses the
+separately installed `cryptography` 50.0.2 package (Apache-2.0 OR BSD-3-Clause).
+No NSZ implementation, encryption keys or game data is vendored.
+
+The adjacent Eden (GPLv3-or-later) checkout remains a read-only reference. No
+Eden source is copied or linked. Earlier source locations and review boundaries
+are recorded in [the reference review](docs/emulator-references.md).

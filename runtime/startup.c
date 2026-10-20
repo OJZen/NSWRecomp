@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdatomic.h>
+#include <sys/ucontext.h>
 
 static const char *stages[] = {"_init_libc0", "nnosInitialize", "_init_libc1",
     "nninitInitializeSdkModule", "nninitStartup", "_init_libc2", "nnMain"};
@@ -41,7 +42,13 @@ void fnprof_hit(uint64_t address, uint64_t lr, uint64_t x0) {
 }
 
 static void fault(int signal, siginfo_t *info, void *context) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    ucontext_t *uc = context;
+    if ((signal == SIGSEGV || signal == SIGBUS) && uc &&
+        kernel_handle_fault(info->si_addr, (uc->uc_mcontext->__es.__esr >> 6) & 1, context)) return;
+#else
     (void)context;
+#endif
     dprintf(STDERR_FILENO, "STARTUP fault stage=%s signal=%d address=%p function=%llx lr=%llx\n",
             stage, signal, info->si_addr, (unsigned long long)last_function, (unsigned long long)last_lr);
     _exit(128 + signal);
@@ -129,7 +136,11 @@ static int number(const char *text, uint64_t *value) {
     return *text && *text != '-' && !*end && !errno;
 }
 
+#ifdef TOTK_GRAPHICS
+int startup_run(int argc, char **argv) {
+#else
 int main(int argc, char **argv) {
+#endif
     uint64_t through, entries[7];
     if (argc != 10 || !number(argv[2], &through) || !through || through > 7) return LOAD_INVALID;
     for (unsigned i = 0; i < 7; i++)
@@ -142,7 +153,14 @@ int main(int argc, char **argv) {
     const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGTRAP, SIGABRT, SIGALRM};
     for (unsigned i = 0; i < sizeof signals / sizeof *signals; i++)
         if (sigaction(signals[i], &action, NULL)) return LOAD_INVALID;
-    alarm(30);
+    unsigned timeout = 30;
+#ifdef TOTK_GRAPHICS
+    uint64_t requested;
+    if (!getenv("TOTK_RUN_SECONDS") || !number(getenv("TOTK_RUN_SECONDS"), &requested) || requested < 1 || requested > 600)
+        return LOAD_INVALID;
+    timeout = (unsigned)requested;
+#endif
+    alarm(timeout);
     LoadedImage image = {0};
     int result = load_plan(argv[1], &image, has_function);
     if (result) return result;
