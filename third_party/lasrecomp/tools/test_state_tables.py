@@ -19,7 +19,9 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 
 class StateTableTests(unittest.TestCase):
-    def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False, scheduled=12, alias=False, distant=False, unrelated=False):
+    def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
+                    scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
+                    alternate=False, far_mask=False, unmapped=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -31,8 +33,20 @@ class StateTableTests(unittest.TestCase):
                         0xdc: 'adr x2, .-92', 0xe0: 'ldrb w3, [x1, x0]', 0xe4: 'add x2, x2, x3, lsl #2',
                         0xe8: 'ldr x7, [x5]' if unrelated else 'nop',
                         0xec: 'br x2', 0xf0: 'mov w0, #99', 0xf4: 'ret'}
-                instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
+                if unmapped:
+                    code.update({0x64: 'b .+104', 0xcc: 'cmp w0, #2', 0xd0: 'b.hi .+32',
+                                 0xd4: 'ldr x7, [x5]', 0xd8: 'ldr x7, [x7]'})
+                    entry = 0xcc
+                if masked:
+                    code.update({0x98: 'mov w0, #44', 0x9c: 'ret', 0xd0: 'and w6, w0, #3',
+                                 0xd4: 'cbz x5, .+28', 0xd8: 'add w6, w6, #5' if clobber else 'nop',
+                                 0xe0: 'ldrb w3, [x1, x6]'})
+                    if alternate: code.update({0xd4: 'cbnz x5, .+8', 0xd8: 'br x7'})
+                    code[0x64] = 'b .+108'
+                    if far_mask: code.update({0x64: 'and w6, w0, #3', 0x68: 'b .+108', 0xd0: 'nop'})
+                    entry, cases, fmt, values = 0xd0, [0x80, 0x88, 0x90, 0x98], '<5B', (0, 2, 4, 6, 0xff)
+                instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
             elif guarded:
                 extra = (['add w0, w0, #6'] if clobber else []) + (['and x6, x0, #0xffffffff'] if alias else [])
                 branch = 0xa0 + scheduled * 4
@@ -93,10 +107,25 @@ uint64_t rt_ticks(void) { abort(); }
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
             native = ctypes.CDLL(str(library)); native.run.argtypes = [ctypes.c_uint64]; native.run.restype = ctypes.c_uint64
             for value, expected in enumerate((11, 22, 33)): self.assertEqual(native.run(value), expected)
-            if guarded or distant: self.assertEqual(native.run(3), 99)
+            if masked:
+                self.assertEqual(native.run(3), 44)
+                self.assertEqual(native.run(4), 11)
+                self.assertEqual(native.run(7), 44)
+            elif guarded or distant: self.assertEqual(native.run(3), 99)
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_guarded_distant_base_ignores_unmapped_object_reads(self):
+        self.check_table(1, distant=True, unmapped=True)
+
+    def test_masked_index_with_loop_invariant_table_base(self):
+        self.check_table(1, distant=True, masked=True)
+        self.check_table(1, distant=True, masked=True, alternate=True)
+        self.check_table(1, distant=True, masked=True, far_mask=True)
+        self.check_table(1, distant=True, masked=True, clobber=True)
+        self.check_table(1, distant=True, masked=True, writable=True)
+        self.check_table(1, distant=True, masked=True, metadata=False)
 
     def test_unrelated_scratch_read_does_not_hide_the_table(self):
         self.check_table(1, distant=True, unrelated=True)

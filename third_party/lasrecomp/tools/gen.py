@@ -222,10 +222,63 @@ class Module:
         if (memory.type != C.ARM64_OP_MEM or not memory.mem.index or memory.mem.disp or
                 memory.shift.type not in (0, C.ARM64_SFT_LSL) or 1 << memory.shift.value != width):
             return None
+        indexed = reg(memory.mem.index)
+        mask_instructions = []
+        if br_pc - low <= 4 * 4096:
+            mask_instructions = list(self.table_disasm.disasm(bytes(self.nso.image[low - self.base:br_pc - self.base]), low))
+        mask_load_at = (load.address - low) // 4
+        if len(mask_instructions) * 4 != br_pc - low: mask_instructions = []
+        masks = {}
+        for i, instruction in enumerate(mask_instructions[:mask_load_at]):
+            args = instruction.operands
+            if (instruction.id == C.ARM64_INS_AND and len(args) == 3 and reg(args[0].reg) == indexed and
+                    args[2].type == C.ARM64_OP_IMM and 0 < args[2].imm < 4096 and
+                    not (args[2].imm & (args[2].imm + 1))):
+                masks[i] = args[2].imm + 1
+        if masks:
+            # A sibling case can end in BR between the mask and this table's direct predecessor.
+            positions = {instruction.address: i for i, instruction in enumerate(mask_instructions)}
+            predecessors = [set() for _ in mask_instructions]
+            for i, instruction in enumerate(mask_instructions):
+                if i + 1 < len(mask_instructions) and self.lift(instruction.address).kind not in ('b', 'br', 'ret', 'trap'):
+                    predecessors[i + 1].add(i)
+                if instruction.group(capstone.CS_GRP_JUMP) and instruction.operands[-1].type == C.ARM64_OP_IMM:
+                    target = positions.get(instruction.operands[-1].imm)
+                    if target is not None: predecessors[target].add(i)
+            successors = [set() for _ in mask_instructions]
+            for at, incoming in enumerate(predecessors):
+                for previous in incoming: successors[previous].add(at)
+            pending, reachable = [0], set()
+            while pending:
+                at = pending.pop()
+                if at in reachable: continue
+                reachable.add(at)
+                pending.extend(successors[at] - reachable)
+            for incoming in predecessors: incoming.intersection_update(reachable)
+            pending, seen, counts = [mask_load_at], set(), set()
+            valid = mask_load_at in reachable
+            while pending and valid:
+                at = pending.pop()
+                if at in seen: continue
+                seen.add(at)
+                if not predecessors[at]: valid = False
+                for previous in predecessors[at]:
+                    instruction = mask_instructions[previous]
+                    if instruction.group(capstone.CS_GRP_CALL): valid = False
+                    elif indexed in (reg(r) for r in instruction.regs_access()[1]):
+                        if previous not in masks: valid = False
+                        else: counts.add(masks[previous])
+                    else: pending.append(previous)
+            if valid and len(counts) == 1:
+                targets = self._emulate_table(br_pc, low, high, load.address, indexed, counts.pop(),
+                                              load.address, readonly_table=(reg(memory.mem.base), width))
+                if targets is not None:
+                    self.stats['masked_tables'] += 1
+                    return targets
         table = constant(reg(memory.mem.base), load_at)
         ro_start = self.base + self.nso.rodata[0]
         ro_end = ro_start + self.nso.rodata[1]
-        if table is None or not ro_start <= table < ro_end or table % width: return None
+        if table is not None and (not ro_start <= table < ro_end or table % width): return None
         if guards:
             guard_at = guards[-1]
             guard_word = self.word(instructions[guard_at].address)
@@ -247,7 +300,7 @@ class Module:
             if compare_at is None: return None
             compare_word = self.word(instructions[compare_at].address)
             count = bits(compare_word, 10, 12) + (condition == 8)
-            if not 0 < count <= 4096 or table + count * width > ro_end: return None
+            if not 0 < count <= 4096: return None
             compared = bits(compare_word, 5, 5)
             indexed, before = reg(memory.mem.index), load_at
             required_mask = (1 << (count - 1).bit_length()) - 1
@@ -266,6 +319,11 @@ class Module:
                 before = copy_at
             if any(compared in (reg(r) for r in i.regs_access()[1]) for i in instructions[compare_at + 1:before]):
                 return None
+            if table is None:
+                if br_pc - low > 4 * 4096: return None
+                return self._emulate_table(br_pc, low, high, load.address, reg(memory.mem.index), count,
+                                           load.address, readonly_table=(reg(memory.mem.base), width))
+            if table + count * width > ro_end: return None
             targets = set()
             for i in range(count):
                 at = table + i * width - self.base
@@ -275,6 +333,7 @@ class Module:
                 targets.add(target)
             self.stats['static_guard_tables'] += 1
             return sorted(targets)
+        if table is None: return None
         targets = set()
         for i in range(4096):
             at = table + i * width
@@ -337,7 +396,7 @@ class Module:
                 if any(o.type == C.ARM64_OP_MEM for o in instruction.operands): reads.add(instruction.address)
         return reads
 
-    def _emulate_table(self, br_pc, entry, end, start, idx, count, set_at):
+    def _emulate_table(self, br_pc, entry, end, start, idx, count, set_at, readonly_table=None):
         """Run start..br for each index value (set at address set_at), collect targets."""
         mu = self.emu()
         rn = bits(self.word(br_pc), 5, 5)
@@ -369,6 +428,13 @@ class Module:
                 if set_at != start and not step_to(start, set_at):
                     return None
                 self._set_index(mu, [idx], i)
+                if readonly_table is not None:
+                    register, width = readonly_table
+                    if register is None or register >= 29: return None
+                    table = mu.reg_read(A.UC_ARM64_REG_X0 + register)
+                    ro_start = self.base + self.nso.rodata[0]
+                    if table % width or not ro_start <= table <= ro_start + self.nso.rodata[1] - count * width:
+                        return None
                 self.table_probe[0] = table_reads
                 if not step_to(set_at, br_pc):
                     return None

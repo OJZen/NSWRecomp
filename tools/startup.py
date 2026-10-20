@@ -96,6 +96,8 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30):
     addresses = entries(modules)
     plan = output.parent / 'image.plan'
     write_plan(plan, modules)
+    # The native child loads this plan; keeping parsed images would duplicate its memory.
+    del modules, n
     environment = dict(os.environ)
     environment['TOTK_RUN_SECONDS'] = str(seconds)
     environment.update(DM_NVN_TBDR='0', DM_PSO_MANIFEST='off', DM_PRESENT_LINK='0', DM_MEM_CAP_GB='4',
