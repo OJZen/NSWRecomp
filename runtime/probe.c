@@ -1,5 +1,5 @@
 // Isolated function validation only; unsupported runtime work must stop the probe.
-#include "cpu.h"
+#include "dispatch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,10 +23,12 @@ static const struct { const char *name; const uint64_t *addresses, *count; const
 };
 volatile int g_fnprof = 0;
 
+#ifndef TOTK_STARTUP
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr; (void)lr; (void)x0; }
+#endif
 static void stop(void) __attribute__((noreturn));
 static void stop(void) { fputs("probe reached unsupported runtime work\n", stderr); abort(); }
-static GuestFn find_function(uint64_t address) {
+GuestFn rt_find_function(uint64_t address) {
     for (unsigned t = 0; t < sizeof tables / sizeof *tables; t++) {
         uint64_t lo = 0, hi = *tables[t].count;
         while (lo < hi) {
@@ -40,19 +42,23 @@ static GuestFn find_function(uint64_t address) {
     return NULL;
 }
 void rt_dispatch(Cpu *c) {
-    GuestFn function = find_function(c->pc);
-    if (!function) stop();
-    function(c);
+    GuestFn function = rt_find_function(c->pc);
+    if (!function) {
+        fprintf(stderr, "missing compiled function: pc=%llx lr=%llx\n",
+                (unsigned long long)c->pc, (unsigned long long)c->x[30]);
+        stop();
+    }
+    __attribute__((musttail)) return function(c);
 }
+#ifndef TOTK_STARTUP
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) { (void)c; (void)imm; (void)pc; stop(); }
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) { (void)c; (void)imm; (void)pc; stop(); }
 void rt_udf(Cpu *c, uint64_t pc) { (void)c; (void)pc; stop(); }
 uint64_t rt_ticks(void) { stop(); }
+#endif
 size_t probe_cpu_size(void) { return sizeof(Cpu); }
 
-#ifdef TOTK_LINK_ALL
-static int has_function(uint64_t address) { return find_function(address) != NULL; }
-int main(int argc, char **argv) {
+int rt_validate_tables(void) {
     uint64_t previous = 0;
     for (unsigned t = 0; t < sizeof tables / sizeof *tables; t++) {
         if (!*tables[t].count) return 1;
@@ -61,6 +67,14 @@ int main(int argc, char **argv) {
             previous = tables[t].addresses[i];
         }
     }
+    return 0;
+}
+
+#if defined(TOTK_LINK_ALL) && !defined(TOTK_STARTUP)
+static int has_function(uint64_t address) { return rt_find_function(address) != NULL; }
+int main(int argc, char **argv) {
+    int valid = rt_validate_tables();
+    if (valid) return valid;
     if (argc == 3 && !strcmp(argv[1], "--load-only")) {
         LoadedImage image = {0};
         int result = load_plan(argv[2], &image, has_function);

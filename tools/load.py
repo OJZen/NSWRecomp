@@ -11,13 +11,12 @@ import tempfile
 import zlib
 
 from bounded import run
-from build import BUILD, context, write_json
+from build import BUILD, RUNTIME, context, write_json
 from recompile import ROOT, Nso, digest, generation_inputs, prepare_work, profile, verify
 
 HEADER = struct.Struct('<15Q')
 MASK64 = (1 << 64) - 1
 R_NONE, R_ABS64, R_GLOB_DAT, R_JUMP_SLOT, R_RELATIVE = 0, 257, 1025, 1026, 1027
-RUNTIME = ('probe.c', 'load.c', 'load.h')
 ADDRESS_UNAVAILABLE = 75  # runtime/load.h; distinct from table/CLI validation failures.
 
 

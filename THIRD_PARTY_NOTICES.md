@@ -17,8 +17,14 @@ Development dependencies are installed separately, not vendored or linked into a
 | [Unicorn](https://github.com/unicorn-engine/unicorn) | 2.1.4 | GPL 2.0 engine / BSD Python bindings; generator analysis and test oracle |
 
 [Zelda-Mobile](https://github.com/OJZen/totk-mobile) is a reference for the v1.4.3
-input fingerprints and runtime boundaries. No source or generated game data from
-its checkout is vendored here. Nintendo properties and user-supplied game files
+input fingerprints and runtime boundaries. No game data from its checkout is
+included here. `runtime/kernel.c` adapts
+its committed memory-service implementation, under Apache-2.0; the original
+license and pinned source digest are in `third_party/zelda-mobile/`. The local
+adaptation uses this project's loaded module metadata and guest stack. Its
+address-space layout follows d2r-mobile; that MIT notice is retained under
+`third_party/zelda-mobile/d2r/LICENSE`. Building
+does not read the neighboring reference repository. Nintendo properties and user-supplied game files
 are not covered by this project's or LASRecomp's license.
 
 The local Ryujinx/Ryubing (root MIT) and Eden (GPLv3-or-later) checkouts were

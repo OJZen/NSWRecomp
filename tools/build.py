@@ -14,6 +14,7 @@ from recompile import ROOT, VENDOR, digest, generate, prepare_work, profile
 
 FLAGS = ['-std=gnu11', '-O1', '-g0', '-fPIC', '-fno-strict-aliasing']
 BUILD = ROOT / 'work/build'
+RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h')
 
 
 def write_json(path, value):
@@ -152,7 +153,7 @@ def build(exefs):
                 raise ValueError('linked function tables differ from generation receipts')
             result.update(status='linked_tables_verified', context=current, compile_batches=metrics,
                           link=link, execution=execution, executable_sha256=digest(candidate),
-                          runtime_sources={name: digest(ROOT / 'runtime' / name) for name in ('probe.c', 'load.c', 'load.h')},
+                          runtime_sources={name: digest(ROOT / 'runtime' / name) for name in RUNTIME},
                           generation={name: {'inputs': r['inputs'], 'files': r['files'],
                                       'unsupported_instructions': r['unsupported_instructions']}
                                       for name, r in generations.items()})

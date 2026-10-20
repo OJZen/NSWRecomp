@@ -1,0 +1,17 @@
+{
+  "source": "https://github.com/OJZen/totk-mobile",
+  "reference_revision": "9699d4314131e960cb189515f350eaccd0bb9c7b",
+  "license": "Apache-2.0",
+  "files": {
+    "host/kernel.c": {
+      "sha256": "1b6c9ae12e6468ab347c8223497b69ec00290c01edea26f128afa3f3e5cbb379",
+      "adapted_as": "runtime/kernel.c"
+    }
+  },
+  "layout_reference": {
+    "source": "https://github.com/jhaizhou-ops/d2r-mobile",
+    "revision": "b94670c795e28742abe1a9cadd64a234a77260ab",
+    "license": "MIT",
+    "license_sha256": "5811600bb8fc4522d3310e8e0e637a1bb14b7c64412f8cfc6234872eb53129b9"
+  }
+}
