@@ -2,7 +2,7 @@
   "repository": "https://github.com/peiikai/LASRecomp",
   "upstream_branch": "beta_5",
   "upstream_commit": "f2c6fb43f77329918b1b2435034997c46d0908cf",
-  "local_revision": "f2c459a104c706182f7a32c4067be8e562387fd1",
+  "local_revision": "4d906a58ca6153b9359047787db0e64eeefd25fb",
   "local_commits": [
     "67cf8fd",
     "d2b62fc",
@@ -17,7 +17,8 @@
     "317e63f",
     "0b96d2f",
     "4634a40",
-    "f2c459a"
+    "f2c459a",
+    "4d906a5"
   ],
   "files": {
     "LICENSE": "31e2e8c10f4461ff75bd2f95e26125f6126ee88828bf29233f4d9f14e90630d6",
@@ -25,7 +26,7 @@
     "runtime/simd.h": "9d4f8dc4cd7a6951be333c92aba5ebb7b0d5c6cde3092492cf03f59c024e499f",
     "runtime/simd_fp.h": "c20e3d16fba1520b5c711ba4f35e0b21399769f8369b6ea7f2b98e7f08c887cd",
     "tools/analyze.py": "6839cbaee754a6c58669c58b77fb0ab543ac2be70ecf0ca32c9adf8f0e6b4283",
-    "tools/gen.py": "dbd6f2f31da519680b5fef915a906e1ed556a4528a5ac356a15a314b29e09c56",
+    "tools/gen.py": "f694aad5d3d810114ed3ecab176b9c5ebf051c5238f197f89f5b6f3f7810a8a7",
     "tools/lifter.py": "5ba78a6beda3bb93b5347edc3cd4808da139fe1d0b7a76043167fea5b4499a85",
     "tools/nso.py": "d10050b4f71f7cc0c5a574855d2ceda4dde5afc668836ee2662118d2c8417e74",
     "tools/simd_c.py": "f251a8570f425e829856ebe3552822bd5c8cc8e33ee91dec00eecb1c6825be93",
@@ -34,7 +35,7 @@
     "tools/test_cpu_native.c": "c562018d0b17201e0c389d8ab1822c2fcc5e1467d6cd7a07836e301fe7eaeec6",
     "tools/test_cpu_semantics.py": "51420f534b5dd448d666b4abc79026b221d840b1335a9e7818704b5f007b79ee",
     "tools/test_fpsr.py": "c670837ac8b93870e0613f4827c973c79a01d14d67b5776a31113ebb3840a44d",
-    "tools/test_jump_tables.py": "9b054f2dae9b1181a1562f43c9507333cb978adc7b4883fdde703854d1147c47",
+    "tools/test_jump_tables.py": "e1b10aabe7e2362a4cc02f58c7339f3c506751f8ab0ec536979de34d64dbe602",
     "tools/test_state_tables.py": "9358fced1635d36d17803fc4aefa25d776bab9eebf31b2f86dbf207e137632c2"
   }
 }

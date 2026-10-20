@@ -49,14 +49,14 @@ static void fault(int signal, siginfo_t *info, void *context) {
 #else
     (void)context;
 #endif
-    dprintf(STDERR_FILENO, "STARTUP fault stage=%s signal=%d address=%p function=%llx lr=%llx\n",
+    dprintf(STDERR_FILENO, "STARTUP fault stage=%s signal=%d address=%p last_entered=%llx lr=%llx\n",
             stage, signal, info->si_addr, (unsigned long long)last_function, (unsigned long long)last_lr);
     _exit(128 + signal);
 }
 
 static void guest_trace(Cpu *c) {
     uint64_t frame = c->x[29];
-    for (unsigned i = 0; i < 32 && frame && !(frame & 15) && kernel_access(frame, 16, 1); i++) {
+    for (unsigned i = 0; i < 32 && frame && !(frame & 7) && kernel_access(frame, 16, 1); i++) {
         uint64_t next = LD64(frame), lr = LD64(frame + 8);
         fprintf(stderr, "STARTUP caller lr=%llx\n", (unsigned long long)lr);
         if (next <= frame || next - frame > 0x100000) break;
@@ -65,7 +65,7 @@ static void guest_trace(Cpu *c) {
 }
 
 void rt_report_missing(Cpu *c) {
-    fprintf(stderr, "STARTUP dispatch miss stage=%s function=%llx lr=%llx\n", stage,
+    fprintf(stderr, "STARTUP dispatch miss stage=%s last_entered=%llx lr=%llx\n", stage,
             (unsigned long long)last_function, (unsigned long long)last_lr);
     guest_trace(c);
 }

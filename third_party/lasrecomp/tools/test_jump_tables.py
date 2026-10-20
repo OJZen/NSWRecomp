@@ -19,7 +19,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 
 class JumpTableTests(unittest.TestCase):
-    def check_table(self, taken, split_guard=False, prior_load=False):
+    def check_table(self, taken, split_guard=False, prior_load=False, conditional=False, unsafe=False):
         with tempfile.TemporaryDirectory(prefix='jump-table-') as temp:
             directory = Path(temp)
             if taken:
@@ -34,6 +34,7 @@ class JumpTableTests(unittest.TestCase):
                                 'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret',
                                 'mov w0, #99', 'ret']
                 branch, cases = 0x98, [0x9c, 0xa4, 0xac]
+            if conditional: instructions[0] = f'ccmp w0, #2, #{0 if unsafe else 2}, ne'
             if split_guard:
                 instructions[3] = 'adr x2, .'
                 instructions[4] = 'ldrsw x3, [x1, x0, lsl #2]'
@@ -41,6 +42,7 @@ class JumpTableTests(unittest.TestCase):
             words = assemble(directory, (['ldrb w8, [x20, x21]'] if prior_load else []) + instructions)
             raw = fixture()
             struct.pack_into('<ii', raw, 0x150, -0x40, -0x40)
+            if conditional: struct.pack_into('<Q', raw, 0x328, len(words) * 4)
             if prior_load: struct.pack_into('<I', raw, 0x17c, words.pop(0))
             struct.pack_into('<' + 'I' * len(words), raw, 0x180, *words)
             for offset in (0x500, 0x508, 0x6f8, 0x700):
@@ -53,6 +55,9 @@ class JumpTableTests(unittest.TestCase):
             base = (ctypes.addressof(buffer) + 4095) & ~4095
             module = gen.Module('synthetic', path, base, 'c', game_patches=False)
             targets = [base + offset for offset in cases]
+            if unsafe:
+                self.assertIsNone(module.jump_table(base + branch, base + 0x80, targets[0]))
+                return
             labels, external, tables = module.scan(base + (0x8c if split_guard else 0x80), targets[0])
             self.assertEqual(tables[base + branch], targets)
             self.assertTrue(set(targets) <= external)
@@ -75,17 +80,19 @@ void rt_brk(Cpu *c, uint32_t i, uint64_t p) { (void)c; (void)i; (void)p; abort()
 void rt_udf(Cpu *c, uint64_t p) { (void)c; (void)p; abort(); }
 uint64_t rt_ticks(void) { abort(); }
 ''' + f'void f_{base + 0x80:x}(Cpu *c);\n'
-                + f'uint64_t run(uint64_t value) {{ Cpu cpu = {{0}}; cpu.x[0] = value; f_{base + 0x80:x}(&cpu); return cpu.x[0]; }}\n')
+                + f'uint64_t run(uint64_t value, uint64_t flags) {{ Cpu cpu = {{0}}; cpu.x[0] = value; cpu.nzcv = flags; f_{base + 0x80:x}(&cpu); return cpu.x[0]; }}\n')
             library = directory / 'synthetic.so'
             subprocess.run(['clang', '-shared', '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
                             *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
                            check=True, timeout=30, capture_output=True)
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
             native = ctypes.CDLL(str(library))
-            native.run.argtypes = [ctypes.c_uint64]
+            native.run.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
             native.run.restype = ctypes.c_uint64
             for value, expected in ((0, 11), (1, 22), (2, 33), (3, 99), (0xffffffff, 99)):
-                self.assertEqual(native.run(value), expected)
+                self.assertEqual(native.run(value, 0), expected)
+            if conditional:
+                for value in (0, 3, 0xffffffff): self.assertEqual(native.run(value, 4 << 28), 99)
             # Targets outside executable text are not accepted merely because they are aligned.
             broken = bytearray(raw)
             if split_guard: struct.pack_into('<i', broken, 0x408, 0x1000)
@@ -93,6 +100,11 @@ uint64_t rt_ticks(void) { abort(); }
             path.write_bytes(broken)
             invalid = gen.Module('synthetic', path, base, 'c', game_patches=False)
             self.assertIsNone(invalid.jump_table(base + branch, base + 0x80, targets[0]))
+
+    def test_conditional_compare_must_skip_the_table_on_fallback(self):
+        for taken in (False, True):
+            self.check_table(taken, conditional=True)
+            self.check_table(taken, conditional=True, unsafe=True)
 
     def test_existing_guard_ignores_unavailable_previous_partition_memory(self):
         self.check_table(False, prior_load=True)

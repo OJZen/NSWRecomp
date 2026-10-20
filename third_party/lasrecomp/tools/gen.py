@@ -158,6 +158,24 @@ class Module:
             return None
         return low, high
 
+    def _table_compare(self, pc, condition):
+        """Index/count for an unsigned table guard; CCMP's fallback must skip the table."""
+        word = self.word(pc)
+        if (word & 0x7F80001F) == 0x7100001F and not bits(word, 22, 1):
+            index, limit = bits(word, 5, 5), bits(word, 10, 12)
+        else:
+            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[pc - self.base:pc - self.base + 4]), pc), None)
+            if instruction is None or instruction.id != C.ARM64_INS_CCMP: return None
+            args = instruction.operands
+            if len(args) != 3 or args[1].type != C.ARM64_OP_IMM or args[2].type != C.ARM64_OP_IMM: return None
+            flags = args[2].imm
+            carry, zero = bool(flags & 2), bool(flags & 4)
+            taken = {2: carry, 3: not carry, 8: carry and not zero, 9: not carry or zero}[condition]
+            if taken != (condition in (2, 8)): return None
+            index, limit = bits(word, 5, 5), args[1].imm
+        count = limit + (condition in (8, 9))
+        return (index, count) if index < 31 and 0 < count <= 4096 else None
+
     def _state_table(self, br_pc, entry):
         """Resolve a readonly relative table from constants, guard or original function bounds."""
         if not self.computed_target(br_pc, entry):
@@ -291,17 +309,14 @@ class Module:
                 return None
             compare_at = None
             for i in range(guard_at - 1, max(-1, guard_at - 9), -1):
-                word = self.word(instructions[i].address)
-                if (word & 0x7F80001F) == 0x7100001F and not bits(word, 22, 1):
+                comparison = self._table_compare(instructions[i].address, condition)
+                if comparison is not None:
                     compare_at = i
                     break
                 if instructions[i].update_flags or instructions[i].group(capstone.CS_GRP_JUMP) or instructions[i].group(capstone.CS_GRP_CALL):
                     return None
             if compare_at is None: return None
-            compare_word = self.word(instructions[compare_at].address)
-            count = bits(compare_word, 10, 12) + (condition == 8)
-            if not 0 < count <= 4096: return None
-            compared = bits(compare_word, 5, 5)
+            compared, count = comparison
             indexed, before = reg(memory.mem.index), load_at
             required_mask = (1 << (count - 1).bit_length()) - 1
             while indexed != compared:
@@ -462,14 +477,10 @@ class Module:
             t = g + sext(bits(w, 5, 19), 19) * 4
             if t != s:
                 continue
-            cw = self.word(g - 4) if g - 4 >= entry else 0
-            if (cw & 0x7F80001F) != 0x7100001F or bits(cw, 22, 1):
-                continue
-            limit = bits(cw, 10, 12)
-            count = limit + 1 if bits(w, 0, 4) == 9 else limit
-            if count <= 0 or count > 4096:
-                continue
-            return self._emulate_table(br_pc, entry, end, s, bits(cw, 5, 5), count, s)
+            comparison = self._table_compare(g - 4, bits(w, 0, 4)) if g - 4 >= entry else None
+            if comparison is None: continue
+            index, count = comparison
+            return self._emulate_table(br_pc, entry, end, s, index, count, s)
         return None
 
     def _jump_table_fallthrough(self, br_pc, entry, end):
@@ -489,24 +500,17 @@ class Module:
             return None
         a = guard - 4
         while a >= entry and guard - a <= 4 * 8:
-            w = self.word(a)
-            # SUBS (imm) with Rd = zr, i.e. CMP #imm
-            if (w & 0x7F80001F) == 0x7100001F:
+            comparison = self._table_compare(a, bits(self.word(guard), 0, 4))
+            if comparison is not None:
                 cmp = a
                 break
-            if self.lift(a).kind != 'op':
+            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[a - self.base:a - self.base + 4]), a), None)
+            if self.lift(a).kind != 'op' or instruction is None or instruction.update_flags:
                 return None
             a -= 4
         if cmp is None:
             return None
-        w = self.word(cmp)
-        if bits(w, 22, 1):
-            return None
-        limit = bits(w, 10, 12)
-        count = limit + 1 if bits(self.word(guard), 0, 4) == 8 else limit
-        if count <= 0 or count > 4096:
-            return None
-        idx = bits(w, 5, 5)
+        idx, count = comparison
         # window start: back from cmp to the first control-flow instruction
         start = cmp
         while start - 4 >= entry and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):

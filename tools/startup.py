@@ -173,7 +173,8 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30):
             if romfs: command += ['--romfs', str(romfs.resolve())]
             if graphics: command += ['--graphics']
             execution = run(command,
-                            cwd=ROOT, log=ROOT / 'work/logs/startup.log', seconds=seconds + 90)
+                            cwd=ROOT, log=ROOT / 'work/logs/startup.log', seconds=seconds + 90,
+                            rss_limit=(3072 if graphics else 1536) << 20)
             result = json.loads(output.read_text())
             result.update(link=link, execution=execution, executable_sha256=digest(directory / 'probe'),
                           runtime_sources={name: digest(ROOT / 'runtime' / name) for name in SOURCES},
