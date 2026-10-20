@@ -1,0 +1,11 @@
+{
+  "version": "1.4.3",
+  "title_id": "0100F2C0115B6000",
+  "modules": {
+    "rtld": {"base": "0x7100000000", "sha256": "49308064fddb52dfe9140c11a32cc6333a0917546c871967d013dcb076402817"},
+    "main": {"base": "0x7100100000", "sha256": "e84a90d551fed0824b4b74933b9c6d043c458521363a7cea58b2faca1822dc9e"},
+    "subsdk0": {"base": "0x7104000000", "sha256": "767c35bcd7d23e78f9063c69b638290b8b83f91e839beb10799e6576960179b1"},
+    "sdk": {"base": "0x7105000000", "sha256": "1d187f29784cd0af46e9e123fc2a62c77b3b07c5a39c8633d90d6c80de64e4ad"}
+  },
+  "rtld_probe_functions": {"memset": "0x2010", "strlen": "0x20e0", "memmove": "0x2200", "strcmp": "0x2440"}
+}
