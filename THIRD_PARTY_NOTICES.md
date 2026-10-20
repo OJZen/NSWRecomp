@@ -20,3 +20,8 @@ Development dependencies are installed separately, not vendored or linked into a
 input fingerprints and runtime boundaries. No source or generated game data from
 its checkout is vendored here. Nintendo properties and user-supplied game files
 are not covered by this project's or LASRecomp's license.
+
+The local Ryujinx/Ryubing (root MIT) and Eden (GPLv3-or-later) checkouts were
+reviewed as references only. No code from either is included or linked here.
+Pinned revisions, source locations, per-file license caveats and the intended
+reuse boundaries are recorded in [the reference review](docs/emulator-references.md).
