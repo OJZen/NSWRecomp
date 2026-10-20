@@ -19,7 +19,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 
 class StateTableTests(unittest.TestCase):
-    def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False, scheduled=12, alias=False, distant=False):
+    def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False, scheduled=12, alias=False, distant=False, unrelated=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -29,6 +29,7 @@ class StateTableTests(unittest.TestCase):
                         0x80: 'mov w0, #11', 0x84: 'ret', 0x88: 'mov w0, #22', 0x8c: 'ret',
                         0x90: 'mov w0, #33', 0x94: 'ret', 0xd4: 'cmp w0, #2', 0xd8: 'b.hi .+24',
                         0xdc: 'adr x2, .-92', 0xe0: 'ldrb w3, [x1, x0]', 0xe4: 'add x2, x2, x3, lsl #2',
+                        0xe8: 'ldr x7, [x5]' if unrelated else 'nop',
                         0xec: 'br x2', 0xf0: 'mov w0, #99', 0xf4: 'ret'}
                 instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
@@ -96,6 +97,9 @@ uint64_t rt_ticks(void) { abort(); }
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_unrelated_scratch_read_does_not_hide_the_table(self):
+        self.check_table(1, distant=True, unrelated=True)
 
     def test_guarded_table_with_scheduled_addresses_and_unmapped_prelude(self):
         self.check_table(2, guarded=True, alias=True)

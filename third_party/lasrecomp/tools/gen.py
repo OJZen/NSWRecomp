@@ -110,7 +110,8 @@ class Module:
             mu.reg_write(A.UC_ARM64_REG_CPACR_EL1, 0x300000)
             probe = self.table_probe
             def read_memory(machine, access, address, size, value, userdata):
-                if probe[0] and SCRATCH_MEM <= address < SCRATCH_MEM + 0x100000:
+                if (probe[0] and SCRATCH_MEM <= address < SCRATCH_MEM + 0x100000 and
+                        machine.reg_read(A.UC_ARM64_REG_PC) in probe[0]):
                     probe[1] = True
             mu.hook_add(uc.UC_HOOK_MEM_READ, read_memory)
             self.mu = mu
@@ -319,6 +320,23 @@ class Module:
         for r in regs:
             mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
 
+    def _table_reads(self, br_pc, start):
+        """Memory reads contributing to the branch target, excluding unrelated scheduled loads."""
+        def register(value):
+            name = self.table_disasm.reg_name(value)
+            if name in ('fp', 'lr', 'wsp'): return {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp'}[name]
+            return 'x' + name[1:] if re.fullmatch('w[0-9]+', name or '') else name
+        needed, reads = {f'x{bits(self.word(br_pc), 5, 5)}'}, set()
+        instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
+        for instruction in reversed(instructions):
+            inputs, outputs = instruction.regs_access()
+            written = {register(r) for r in outputs}
+            if needed & written:
+                needed.difference_update(written)
+                needed.update(register(r) for r in inputs)
+                if any(o.type == C.ARM64_OP_MEM for o in instruction.operands): reads.add(instruction.address)
+        return reads
+
     def _emulate_table(self, br_pc, entry, end, start, idx, count, set_at):
         """Run start..br for each index value (set at address set_at), collect targets."""
         mu = self.emu()
@@ -334,6 +352,7 @@ class Module:
                 pc = mu.reg_read(A.UC_ARM64_REG_PC)
             return False
 
+        table_reads = self._table_reads(br_pc, set_at)
         targets = []
         try:
             for i in range(count):
@@ -350,7 +369,7 @@ class Module:
                 if set_at != start and not step_to(start, set_at):
                     return None
                 self._set_index(mu, [idx], i)
-                self.table_probe[0] = True
+                self.table_probe[0] = table_reads
                 if not step_to(set_at, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
@@ -428,6 +447,7 @@ class Module:
             start -= 4
         idx_regs = self._index_regs(start, cmp, idx)
         mu = self.emu()
+        table_reads = self._table_reads(br_pc, cmp)
         targets = []
 
         def step_to(frm, to):
@@ -458,7 +478,7 @@ class Module:
                 if not step_to(start, cmp):
                     return None
                 self._set_index(mu, idx_regs, i)
-                self.table_probe[0] = True
+                self.table_probe[0] = table_reads
                 if not step_to(cmp, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
