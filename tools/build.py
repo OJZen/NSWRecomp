@@ -140,7 +140,8 @@ def build(exefs):
         response = BUILD / 'link.rsp'
         candidate = BUILD / 'link-probe.partial'
         command = ['clang', *FLAGS, '-DTOTK_LINK_ALL', '-I', str(VENDOR / 'runtime'),
-                   str(ROOT / 'runtime/probe.c'), *map(str, objects), '-lm', '-o', str(candidate)]
+                   str(ROOT / 'runtime/probe.c'), str(ROOT / 'runtime/load.c'),
+                   *map(str, objects), '-lm', '-o', str(candidate)]
         response.write_text(shlex.join(command[1:]) + '\n')
         try:
             link = run(['clang', '@' + str(response)], cwd=ROOT, log=ROOT / 'work/logs/link.log')
@@ -151,7 +152,7 @@ def build(exefs):
                 raise ValueError('linked function tables differ from generation receipts')
             result.update(status='linked_tables_verified', context=current, compile_batches=metrics,
                           link=link, execution=execution, executable_sha256=digest(candidate),
-                          runtime_sha256=digest(ROOT / 'runtime/probe.c'),
+                          runtime_sources={name: digest(ROOT / 'runtime' / name) for name in ('probe.c', 'load.c', 'load.h')},
                           generation={name: {'inputs': r['inputs'], 'files': r['files'],
                                       'unsupported_instructions': r['unsupported_instructions']}
                                       for name, r in generations.items()})
