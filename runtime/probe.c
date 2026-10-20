@@ -29,6 +29,7 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr; (void)lr;
 static void stop(void) __attribute__((noreturn));
 static void stop(void) { fputs("probe reached unsupported runtime work\n", stderr); exit(78); }
 __attribute__((weak)) GuestFn rt_find_external(uint64_t address) { (void)address; return NULL; }
+__attribute__((weak)) void rt_report_missing(Cpu *cpu) { (void)cpu; }
 GuestFn rt_find_function(uint64_t address) {
     for (unsigned t = 0; t < sizeof tables / sizeof *tables; t++) {
         uint64_t lo = 0, hi = *tables[t].count;
@@ -45,6 +46,7 @@ GuestFn rt_find_function(uint64_t address) {
 void rt_dispatch(Cpu *c) {
     GuestFn function = rt_find_function(c->pc);
     if (!function) {
+        rt_report_missing(c);
         fprintf(stderr, "missing compiled function: pc=%llx lr=%llx\n",
                 (unsigned long long)c->pc, (unsigned long long)c->x[30]);
         stop();

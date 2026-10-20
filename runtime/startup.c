@@ -64,6 +64,12 @@ static void guest_trace(Cpu *c) {
     }
 }
 
+void rt_report_missing(Cpu *c) {
+    fprintf(stderr, "STARTUP dispatch miss stage=%s function=%llx lr=%llx\n", stage,
+            (unsigned long long)last_function, (unsigned long long)last_lr);
+    guest_trace(c);
+}
+
 void rt_svc(Cpu *c, uint32_t number, uint64_t pc) {
     threads_checkpoint();
     if (kernel_svc(number, c->x)) { threads_checkpoint(); return; }

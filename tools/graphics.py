@@ -22,6 +22,7 @@ SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'frontend.m', 'nvn/hle
 def source_hashes():
     files = sorted(GFX.rglob('*')) + [ROOT / 'runtime/nvn_bridge.h', ROOT / 'tools/nvn_bridge.py', Path(__file__)]
     files += [HEADERS / 'nvn_protos.h', HEADERS / 'include/nvn.h', ROOT / 'third_party/zelda-mobile/core/third_party/bcdec/bcdec.h']
+    files += sorted((ROOT / 'runtime').glob('*.h')) + sorted((VENDOR / 'runtime').glob('*.h'))
     return {str(p.relative_to(ROOT)): digest(p) for p in files if p.is_file()}
 
 

@@ -59,6 +59,7 @@ class Module:
         self.patches, self.hooks, self.rando_code = load_game_patches() if game_patches else ({}, {}, {})
         self.stats = Counter()
         self.mu = None
+        self.table_probe = [False, False]
         self.function_spans = None
         self.table_disasm = capstone.Cs(capstone.CS_ARCH_ARM64, capstone.CS_MODE_LITTLE_ENDIAN)
         self.table_disasm.detail = True
@@ -107,6 +108,11 @@ class Module:
             mu.mem_write(self.base, bytes(n.image))
             mu.mem_map(SCRATCH_MEM, 0x100000)
             mu.reg_write(A.UC_ARM64_REG_CPACR_EL1, 0x300000)
+            probe = self.table_probe
+            def read_memory(machine, access, address, size, value, userdata):
+                if probe[0] and SCRATCH_MEM <= address < SCRATCH_MEM + 0x100000:
+                    probe[1] = True
+            mu.hook_add(uc.UC_HOOK_MEM_READ, read_memory)
             self.mu = mu
         return self.mu
 
@@ -123,12 +129,17 @@ class Module:
                 r = self._jump_table_taken(br_pc, start, end)
             if r is not None:
                 return r
+        if self.computed_target(br_pc, entry):
+            bounds = self._original_bounds(br_pc)
+            if bounds and bounds[0] < starts[-1] and br_pc - bounds[0] <= 4 * 4096:
+                r = self._jump_table_fallthrough(br_pc, bounds[0], end)
+                if r is None:
+                    r = self._jump_table_taken(br_pc, bounds[0], end)
+                if r is not None:
+                    return r
         return self._state_table(br_pc, entry)
 
-    def _state_table(self, br_pc, entry):
-        """Infer a readonly relative table bounded by the original function's metadata."""
-        if not self.computed_target(br_pc, entry):
-            return None
+    def _original_bounds(self, br_pc):
         if self.function_spans is None:
             starts = sorted(self.base + a for a in eh_frame_functions(self.nso) if self.in_text(self.base + a))
             spans = dict(zip(starts, starts[1:]))
@@ -144,14 +155,22 @@ class Module:
         low, high = self.function_spans[index]
         if not low <= br_pc < high:
             return None
+        return low, high
+
+    def _state_table(self, br_pc, entry):
+        """Resolve a readonly relative table from constants, guard or original function bounds."""
+        if not self.computed_target(br_pc, entry):
+            return None
+        bounds = self._original_bounds(br_pc)
+        if bounds is None: return None
+        low, high = bounds
         start = max(low, br_pc - 4 * 32)
         instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
         if len(instructions) * 4 != br_pc - start:
             return None
-        # A failed bounds-checked table must not become a guessed shorter table.
-        if any((self.word(i.address) & 0xFF000010) == 0x54000000 and
-               bits(self.word(i.address), 0, 4) in (2, 3, 8, 9) for i in instructions):
-            return None
+        guards = [i for i, instruction in enumerate(instructions)
+                  if (self.word(instruction.address) & 0xFF000010) == 0x54000000 and
+                  bits(self.word(instruction.address), 0, 4) in (2, 3, 8, 9)]
 
         def reg(register):
             name = self.table_disasm.reg_name(register)
@@ -206,6 +225,55 @@ class Module:
         ro_start = self.base + self.nso.rodata[0]
         ro_end = ro_start + self.nso.rodata[1]
         if table is None or not ro_start <= table < ro_end or table % width: return None
+        if guards:
+            guard_at = guards[-1]
+            guard_word = self.word(instructions[guard_at].address)
+            condition = bits(guard_word, 0, 4)
+            destination = instructions[guard_at].address + sext(bits(guard_word, 5, 19), 19) * 4
+            if (condition not in (2, 8) or guard_at >= load_at or
+                    instructions[guard_at].address < destination <= br_pc or
+                    any(i.group(capstone.CS_GRP_JUMP) or i.group(capstone.CS_GRP_CALL) or i.group(capstone.CS_GRP_RET)
+                        for i in instructions[guard_at + 1:])):
+                return None
+            compare_at = None
+            for i in range(guard_at - 1, max(-1, guard_at - 9), -1):
+                word = self.word(instructions[i].address)
+                if (word & 0x7F80001F) == 0x7100001F and not bits(word, 22, 1):
+                    compare_at = i
+                    break
+                if instructions[i].update_flags or instructions[i].group(capstone.CS_GRP_JUMP) or instructions[i].group(capstone.CS_GRP_CALL):
+                    return None
+            if compare_at is None: return None
+            compare_word = self.word(instructions[compare_at].address)
+            count = bits(compare_word, 10, 12) + (condition == 8)
+            if not 0 < count <= 4096 or table + count * width > ro_end: return None
+            compared = bits(compare_word, 5, 5)
+            indexed, before = reg(memory.mem.index), load_at
+            required_mask = (1 << (count - 1).bit_length()) - 1
+            while indexed != compared:
+                copy_at = writer(indexed, before)
+                if copy_at is None or copy_at <= compare_at: return None
+                copy = instructions[copy_at]
+                args = copy.operands
+                if (copy.id == C.ARM64_INS_MOV and len(args) == 2 and args[1].type == C.ARM64_OP_REG):
+                    indexed = reg(args[1].reg)
+                elif (copy.id == C.ARM64_INS_AND and len(args) == 3 and args[2].type == C.ARM64_OP_IMM and
+                      args[2].imm & required_mask == required_mask):
+                    indexed = reg(args[1].reg)
+                else:
+                    return None
+                before = copy_at
+            if any(compared in (reg(r) for r in i.regs_access()[1]) for i in instructions[compare_at + 1:before]):
+                return None
+            targets = set()
+            for i in range(count):
+                at = table + i * width - self.base
+                offset = int.from_bytes(self.nso.image[at:at + width], 'little', signed=width == 4)
+                target = case_base + (offset << operands[2].shift.value)
+                if not self.in_text(target): return None
+                targets.add(target)
+            self.stats['static_guard_tables'] += 1
+            return sorted(targets)
         targets = set()
         for i in range(4096):
             at = table + i * width
@@ -262,12 +330,14 @@ class Module:
                 if pc == to:
                     return True
                 mu.emu_start(pc, 0, count=1)
+                if self.table_probe[1]: return False
                 pc = mu.reg_read(A.UC_ARM64_REG_PC)
             return False
 
         targets = []
         try:
             for i in range(count):
+                self.table_probe[:] = [False, False]
                 for r in range(29):
                     mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
                 mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
@@ -280,6 +350,7 @@ class Module:
                 if set_at != start and not step_to(start, set_at):
                     return None
                 self._set_index(mu, [idx], i)
+                self.table_probe[0] = True
                 if not step_to(set_at, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
@@ -289,6 +360,8 @@ class Module:
                 targets.append(t)
         except uc.UcError:
             return None
+        finally:
+            self.table_probe[0] = False
         return sorted(set(targets))
 
     def _jump_table_taken(self, br_pc, entry, end):
@@ -364,11 +437,13 @@ class Module:
                 if pc == to:
                     return True
                 mu.emu_start(pc, 0, count=1)
+                if self.table_probe[1]: return False
                 pc = mu.reg_read(A.UC_ARM64_REG_PC)
             return False
 
         try:
             for i in range(count):
+                self.table_probe[:] = [False, False]
                 for r in range(29):
                     mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
                 mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
@@ -383,6 +458,7 @@ class Module:
                 if not step_to(start, cmp):
                     return None
                 self._set_index(mu, idx_regs, i)
+                self.table_probe[0] = True
                 if not step_to(cmp, br_pc):
                     return None
                 t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
@@ -392,6 +468,8 @@ class Module:
                 targets.append(t)
         except uc.UcError:
             return None
+        finally:
+            self.table_probe[0] = False
         return sorted(set(targets))
 
     # ------------------------------------------------------------ functions
