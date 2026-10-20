@@ -72,7 +72,28 @@ class LoadTests(unittest.TestCase):
         self.plan = self.root / 'image.plan'
 
     def native_run(self, mode=0):
-        return subprocess.run([str(self.native), str(self.plan), str(mode)], capture_output=True, text=True, timeout=10)
+        for _ in range(8):
+            result = subprocess.run([str(self.native), str(self.plan), str(mode)], capture_output=True, text=True, timeout=10)
+            if result.returncode != load.ADDRESS_UNAVAILABLE:
+                return result
+        self.fail('synthetic fixed address unavailable after 8 process attempts')
+
+    def test_native_retry_is_bounded_and_only_for_address_unavailability(self):
+        unavailable = subprocess.CompletedProcess([], load.ADDRESS_UNAVAILABLE, '', 'address reservation')
+        success = subprocess.CompletedProcess([], 0, '{"game_executed":false}', '')
+        with patch.object(load.subprocess, 'run', side_effect=[unavailable, unavailable, success]) as run:
+            self.assertEqual(load.native_load(self.plan), ({'game_executed': False}, 3))
+            self.assertEqual(run.call_count, 3)
+        for code in (1, 2, -9):
+            invalid = subprocess.CompletedProcess([], code, '', 'invalid data or execution')
+            with patch.object(load.subprocess, 'run', return_value=invalid) as run:
+                with self.assertRaisesRegex(ValueError, 'invalid data or execution'):
+                    load.native_load(self.plan)
+                self.assertEqual(run.call_count, 1)
+        with patch.object(load.subprocess, 'run', return_value=unavailable) as run:
+            with self.assertRaisesRegex(ValueError, 'after 8'):
+                load.native_load(self.plan)
+            self.assertEqual(run.call_count, 8)
 
     def test_native_mapping_relocations_permissions_cleanup_and_collision(self):
         before = bytes(self.modules[0].nso.image)
@@ -82,7 +103,7 @@ class LoadTests(unittest.TestCase):
         self.assertEqual(report['main']['unresolved_weak_symbols'], 1)
         for mode in (0, 2, 3) * 4:
             r = self.native_run(mode)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 0, f'mode={mode}: {r.stderr}')
         self.assertNotEqual(self.native_run(1).returncode, 0)
 
     def test_shared_host_page_is_reported(self):

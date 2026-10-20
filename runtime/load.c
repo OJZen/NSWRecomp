@@ -1,5 +1,6 @@
 #include "load.h"
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -82,6 +83,10 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
     if (!file) { close(fd); return 1; }
     char magic[8];
     uint64_t count;
+    const char *stage = "header";
+    size_t module_index = 0;
+    int native_error = 0;
+    int result = LOAD_INVALID;
     long page = sysconf(_SC_PAGESIZE);
     if (page < 4096 || page > 65536 || (page & (page - 1))) goto fail;
     image->page_size = (size_t)page;
@@ -89,6 +94,8 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
         !read_u64(file, &count) || !count || count > 4) goto fail;
 
     for (uint64_t i = 0; i < count; i++) {
+        module_index = i;
+        stage = "module layout";
         LoadedModule *m = &image->modules[i];
         LoadHeader *h = &m->header;
         uint64_t *fields[] = {&h->base, &h->size, &h->text_offset, &h->text_size,
@@ -113,29 +120,41 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
             (i && h->base < image->modules[i - 1].header.base + image->modules[i - 1].mapped_size) ||
             image->bytes + m->mapped_size > (256 << 20)) goto fail;
         void *requested = (void *)(uintptr_t)h->base;
+        stage = "address reservation";
 #ifdef __APPLE__
         mach_vm_address_t address = h->base;
         // mmap's address hint may be ignored; FIXED without OVERWRITE fails on collisions.
-        if (mach_vm_allocate(mach_task_self(), &address, m->mapped_size, VM_FLAGS_FIXED) != KERN_SUCCESS) goto fail;
+        native_error = mach_vm_allocate(mach_task_self(), &address, m->mapped_size, VM_FLAGS_FIXED);
+        if (native_error != KERN_SUCCESS) {
+            if (native_error == KERN_NO_SPACE) result = LOAD_ADDRESS_UNAVAILABLE;
+            goto fail;
+        }
         void *mapped = (void *)(uintptr_t)address;
         if (mapped != requested) {
             mach_vm_deallocate(mach_task_self(), address, m->mapped_size);
+            result = LOAD_ADDRESS_UNAVAILABLE;
             goto fail;
         }
 #else
         void *mapped = mmap(requested, m->mapped_size, PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (mapped == MAP_FAILED) goto fail;
-        if (mapped != requested) { munmap(mapped, m->mapped_size); goto fail; }
+        if (mapped == MAP_FAILED) { native_error = errno; goto fail; }
+        if (mapped != requested) {
+            munmap(mapped, m->mapped_size);
+            result = LOAD_ADDRESS_UNAVAILABLE;
+            goto fail;
+        }
 #endif
         m->memory = mapped;
         image->count++;
         image->bytes += m->mapped_size;
+        stage = "segment copy";
         size_t stored = h->data_offset + h->data_size;
         if (fread(mapped, 1, stored, file) != stored) goto fail;
         unsigned char *bytes = mapped;
         for (size_t j = stored; j < h->size; j++) if (bytes[j]) goto fail;
         uint64_t previous = 0;
+        stage = "relocation writes";
         for (uint64_t r = 0; r < h->relocations; r++) {
             uint64_t offset, value;
             if (!read_u64(file, &offset) || !read_u64(file, &value) || offset % 8 ||
@@ -144,11 +163,15 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
             for (unsigned b = 0; b < 8; b++) bytes[offset + b] = (unsigned char)(value >> (8 * b));
             previous = offset;
         }
+        stage = "memory checksum";
         if (crc32(bytes, h->size) != h->crc32) goto fail;
         image->relocations += h->relocations;
     }
+    stage = "file end";
     if (fgetc(file) != EOF || ferror(file)) goto fail;
     for (size_t i = 0; i < image->count; i++) {
+        module_index = i;
+        stage = "compiled entry coverage";
         LoadedModule *m = &image->modules[i];
         LoadHeader *h = &m->header;
         if (h->init) {
@@ -166,12 +189,16 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
             image->entry_functions++;
         }
         for (size_t at = 0; at < m->mapped_size; at += image->page_size) {
+            stage = "page protection";
             int read = overlaps(h->text_offset, h->text_size, at, image->page_size) ||
                        overlaps(h->ro_offset, h->ro_size, at, image->page_size);
             int write = overlaps(h->data_offset, h->data_size + h->bss_size, at, image->page_size);
             image->mixed_pages += read && write;
             int prot = write ? PROT_READ | PROT_WRITE : read ? PROT_READ : PROT_NONE;
-            if (mprotect((unsigned char *)m->memory + at, image->page_size, prot)) goto fail;
+            if (mprotect((unsigned char *)m->memory + at, image->page_size, prot)) {
+                native_error = errno;
+                goto fail;
+            }
         }
     }
     fclose(file);
@@ -179,6 +206,6 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
 fail:
     fclose(file);
     unload_image(image);
-    fputs("load-only rejected invalid plan, occupied address or missing compiled entry\n", stderr);
-    return 1;
+    fprintf(stderr, "load-only rejected: %s; module=%zu; native=%d\n", stage, module_index, native_error);
+    return result;
 }

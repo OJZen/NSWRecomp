@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+enum { LOAD_INVALID = 1, LOAD_ADDRESS_UNAVAILABLE = 75 };
+
 typedef struct {
     uint64_t base, size, text_offset, text_size, ro_offset, ro_size;
     uint64_t data_offset, data_size, bss_size, relocations;

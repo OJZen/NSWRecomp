@@ -19,17 +19,25 @@ SI int FN(isinf)(U u) { return (u & ~SGN) == EXPM; }
 SI int FN(iszero)(U u) { return !(u & ~SGN); }
 SI int FN(isden)(U u) { return !(u & EXPM) && (u & ~SGN); }
 SI T FN(flush)(T x) { U u = FN(fb)(x); return FN(isden)(u) ? FN(fv)(u & SGN) : x; }
-SI T FN(fz)(Cpu *c, T x) { return __builtin_expect(c->fpcr & FPCR_FZ, 0) ? FN(flush)(x) : x; }
+SI T FN(fz)(Cpu *c, T x) {
+    if (__builtin_expect((c->fpcr & FPCR_FZ) && FN(isden)(FN(fb)(x)), 0)) {
+        c->fpsr |= FPSR_IDC;
+        return FN(flush)(x);
+    }
+    return x;
+}
 SI T FN(neg)(T x) { return FN(fv)(FN(fb)(x) ^ SGN); }
 
 // FPProcessNaN(s): first signalling NaN (quietened), else first quiet NaN, else (invalid op) default NaN
 SN T FN(nan1)(Cpu *c, T a) {
     U x = FN(fb)(a);
+    if (FN(issnan)(x)) c->fpsr |= FPSR_IOC;
     if (!(c->fpcr & FPCR_DN) && FN(isnan)(x)) return FN(fv)(x | QB);
     return FN(fv)(DNAN);
 }
 SN T FN(nan2)(Cpu *c, T a, T b) {
     U x = FN(fb)(a), y = FN(fb)(b);
+    if (FN(issnan)(x) || FN(issnan)(y)) c->fpsr |= FPSR_IOC;
     if (!(c->fpcr & FPCR_DN)) {
         if (FN(issnan)(x)) return FN(fv)(x | QB);
         if (FN(issnan)(y)) return FN(fv)(y | QB);
@@ -40,6 +48,7 @@ SN T FN(nan2)(Cpu *c, T a, T b) {
 }
 SN T FN(nan3)(Cpu *c, T a, T b, T d) {
     U x = FN(fb)(a), y = FN(fb)(b), z = FN(fb)(d);
+    if (FN(issnan)(x) || FN(issnan)(y) || FN(issnan)(z)) c->fpsr |= FPSR_IOC;
     if (!(c->fpcr & FPCR_DN)) {
         if (FN(issnan)(x)) return FN(fv)(x | QB);
         if (FN(issnan)(y)) return FN(fv)(y | QB);
@@ -124,7 +133,7 @@ SI T FN(minmax)(Cpu *c, int op, T a, T b) {
 SN T FN(slow)(Cpu *c, int op, T a, T b, T d) {
 #pragma STDC FENV_ACCESS ON
     uint64_t fpcr = c->fpcr;
-    if (fpcr & FPCR_FZ) a = FN(flush)(a), b = FN(flush)(b), d = FN(flush)(d);
+    if (fpcr & FPCR_FZ) a = FN(fz)(c, a), b = FN(fz)(c, b), d = FN(fz)(c, d);
     if (FMINMAX(op)) return FN(minmax)(c, op, a, b);
     int old = simd_host_round();
     simd_set_host_round(simd_fe_mode(fpcr));
@@ -184,19 +193,30 @@ SI VT FN(vfz)(Cpu *c, VT a) {
     if (__builtin_expect(c->fpcr & FPCR_FZ, 0)) {
         VTU u = (VTU)a, mag = u & ~((VTU){} + SGN);
         VTS den = (mag != 0) & ((u & EXPM) == 0);
+        if (__builtin_reduce_or(den)) c->fpsr |= FPSR_IDC;
         a = (VT)FN(vsel)(den, u & SGN, u);
     }
     return a;
 }
 
 // ---- compares
-SI uint64_t FN(cmp)(Cpu *c, T a, T b) { // FCMP NZCV
+SI uint64_t FN(cmp)(Cpu *c, T a, T b, int signal) { // FCMP/FCMPE NZCV
     a = FN(fz)(c, a), b = FN(fz)(c, b);
+    U x = FN(fb)(a), y = FN(fb)(b);
+    if (FN(isnan)(x) || FN(isnan)(y)) {
+        if (signal || FN(issnan)(x) || FN(issnan)(y)) c->fpsr |= FPSR_IOC;
+        return 0x30000000ull;
+    }
     return a == b ? 0x60000000ull : a < b ? 0x80000000ull : a > b ? 0x20000000ull : 0x30000000ull;
 }
 // FCMEQ/FCMGE/FCMGT/FACGE/FACGT (op 0..4)
 SI VTU FN(vcmp)(Cpu *c, int op, VT a, VT b) {
     a = FN(vfz)(c, a), b = FN(vfz)(c, b);
+    for (int i = 0; i < NL; i++) {
+        U x = FN(fb)(a[i]), y = FN(fb)(b[i]);
+        if (FN(issnan)(x) || FN(issnan)(y) || (op != 0 && (FN(isnan)(x) || FN(isnan)(y))))
+            c->fpsr |= FPSR_IOC;
+    }
     if (op >= 3) a = __builtin_elementwise_abs(a), b = __builtin_elementwise_abs(b);
     switch (op) {
     case 0: return (VTU)(a == b);
@@ -218,13 +238,16 @@ SI T FN(rnd)(T x, int rm) {
 }
 SI T FN(frint)(Cpu *c, T x, int rm) {
     x = FN(fz)(c, x);
+    int exact = rm == 5;
     if (rm >= 5) rm = (int)((c->fpcr >> 22) & 3);
     T r = FN(rnd)(x, rm);
     if (__builtin_expect(r != r, 0)) r = FN(nan1)(c, x);
+    else if (exact && r != x) c->fpsr |= FPSR_IXC;
     return r;
 }
 SI VT FN(vfrint)(Cpu *c, VT x, int rm) {
     x = FN(vfz)(c, x);
+    int exact = rm == 5;
     if (rm >= 5) rm = (int)((c->fpcr >> 22) & 3);
     VT r;
     switch (rm) {
@@ -234,9 +257,10 @@ SI VT FN(vfrint)(Cpu *c, VT x, int rm) {
     case 3: r = __builtin_elementwise_trunc(x); break;
     default: r = __builtin_elementwise_round(x); break;
     }
-    if (__builtin_expect(__builtin_reduce_or(r != r) != 0, 0))
-        for (int i = 0; i < NL; i++)
-            if (r[i] != r[i]) r[i] = FN(nan1)(c, x[i]);
+    for (int i = 0; i < NL; i++) {
+        if (r[i] != r[i]) r[i] = FN(nan1)(c, x[i]);
+        else if (exact && r[i] != x[i]) c->fpsr |= FPSR_IXC;
+    }
     return r;
 }
 
@@ -245,7 +269,13 @@ SI uint64_t FN(toint)(Cpu *c, T x, int rm, int fbits, int ib, int uns) {
     x = FN(fz)(c, x);
     if (fbits) x = x * (T)(1ull << (fbits - 1)) * K(2);
     T r = FN(rnd)(x, rm);
-    if (r != r) return 0;
+    if (r != r) { c->fpsr |= FPSR_IOC; return 0; }
+    T hi = uns ? (ib == 32 ? K(4294967296.0) : K(18446744073709551616.0))
+               : (ib == 32 ? K(2147483648.0) : K(9223372036854775808.0));
+    T lo = uns ? K(0) : -hi;
+    // Invalid conversions suppress newly generated inexact, not an already sticky IXC.
+    if (r < lo || r >= hi) c->fpsr |= FPSR_IOC;
+    else if (r != x) c->fpsr |= FPSR_IXC;
     if (uns) {
         if (r <= K(0)) return 0;
         if (ib == 32) return r >= K(4294967296.0) ? 0xffffffffull : (uint32_t)r;

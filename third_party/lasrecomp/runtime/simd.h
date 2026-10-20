@@ -3,7 +3,9 @@
 // Semantics follow the ARM pseudocode, not the host: NaN propagation (first signalling NaN quietened, then
 // first quiet NaN), FPCR.DN default NaN, FPCR.FZ flushing (inputs and pre-rounding-tiny results), FPCR.RMode
 // for arithmetic / conversions / FRINTX/I, saturating FP->int conversions, fused multiply-add, ARM estimate
-// tables. Not modelled: FPSR cumulative exception bits and QC, FPCR trap enables, FP16 arithmetic (ARMv8.2).
+// tables. QC and compare/round/FP-to-int status are modelled.
+// shortcut: arithmetic/precision-conversion exception status is partial; finish before claiming full fenv support.
+// FPCR trap enables and FP16 arithmetic (ARMv8.2) are not modelled.
 // FPCR.AHP is honoured by the half-precision conversions. Host assumptions: IEEE binary32/64, MXCSR (or the
 // host FPU) in round-to-nearest with denormals enabled; fma must be correctly rounded (build x86 with -mfma).
 #pragma once
@@ -51,6 +53,10 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define FPCR_FZ (1u << 24)
 #define FPCR_RM (3u << 22)
 #define FPCR_SLOW (FPCR_FZ | FPCR_RM)
+#define FPSR_IOC (1u << 0)
+#define FPSR_IXC (1u << 4)
+#define FPSR_IDC (1u << 7)
+#define FPSR_QC (1u << 27)
 
 enum { FOP_ADD, FOP_SUB, FOP_MUL, FOP_MULX, FOP_NMUL, FOP_DIV, FOP_ABD, FOP_SQRT, FOP_MADD, FOP_RECPS, FOP_RSQRTS,
        FOP_MAX, FOP_MIN, FOP_MAXNM, FOP_MINNM };
@@ -421,15 +427,20 @@ SI void lset(u128 *v, int sz, int i, uint64_t x) {
     default: *(sa64 *)p = x; break;
     }
 }
-SI uint64_t sat_s(__int128 v, int sz) {
+SI uint64_t sat_s(Cpu *c, __int128 v, int sz) {
     __int128 hi = ((__int128)1 << ((8 << sz) - 1)) - 1, lo = -hi - 1;
+    if (v > hi || v < lo) c->fpsr |= FPSR_QC;
     return (uint64_t)(v > hi ? hi : v < lo ? lo : v) & lmask(sz);
 }
-SI uint64_t sat_u(__int128 v, int sz) {
+SI uint64_t sat_u(Cpu *c, __int128 v, int sz) {
     __int128 hi = ((__int128)1 << (8 << sz)) - 1;
+    if (v > hi || v < 0) c->fpsr |= FPSR_QC;
     return (uint64_t)(v > hi ? hi : v < 0 ? 0 : v);
 }
-SI uint64_t sat_uu(unsigned __int128 v, int sz) { return v > lmask(sz) ? lmask(sz) : (uint64_t)v; }
+SI uint64_t sat_uu(Cpu *c, unsigned __int128 v, int sz) {
+    if (v > lmask(sz)) c->fpsr |= FPSR_QC;
+    return v > lmask(sz) ? lmask(sz) : (uint64_t)v;
+}
 SI __int128 shl128(__int128 v, int s) { return (__int128)((unsigned __int128)v << s); }
 // right shift by s >= 1 with optional rounding, as an infinite-precision value
 SI __int128 lshr_s(int64_t v, int s, int rnd) {
@@ -465,31 +476,31 @@ enum {
 };
 #define LOP_U 256 // unsigned variant flag
 
-SI uint64_t lop(int op, int sz, uint64_t a, uint64_t b, uint64_t d) {
+SI uint64_t lop(Cpu *c, int op, int sz, uint64_t a, uint64_t b, uint64_t d) {
     int u = op >> 8, es = 8 << sz;
     op &= 255;
     int64_t sa = lsx(a, sz), sb = lsx(b, sz);
     __int128 xa = u ? (__int128)a : (__int128)sa, xb = u ? (__int128)b : (__int128)sb; // extended operands
     int sh = (int8_t)b;
     switch (op) {
-    case LOP_SQADD: return sat_s((__int128)sa + sb, sz);
-    case LOP_UQADD: return sat_u((__int128)a + b, sz);
-    case LOP_SQSUB: return sat_s((__int128)sa - sb, sz);
-    case LOP_UQSUB: return sat_u((__int128)a - b, sz);
-    case LOP_SUQADD: return sat_s((__int128)lsx(d, sz) + a, sz);
-    case LOP_USQADD: return sat_u((__int128)d + sa, sz);
+    case LOP_SQADD: return sat_s(c, (__int128)sa + sb, sz);
+    case LOP_UQADD: return sat_u(c, (__int128)a + b, sz);
+    case LOP_SQSUB: return sat_s(c, (__int128)sa - sb, sz);
+    case LOP_UQSUB: return sat_u(c, (__int128)a - b, sz);
+    case LOP_SUQADD: return sat_s(c, (__int128)lsx(d, sz) + a, sz);
+    case LOP_USQADD: return sat_u(c, (__int128)d + sa, sz);
     case LOP_SHL: case LOP_RSHL: case LOP_QSHL: case LOP_QRSHL: {
         int sat = op == LOP_QSHL || op == LOP_QRSHL, rnd = op == LOP_RSHL || op == LOP_QRSHL;
         if (sh >= 0) {
-            if (sat) return u ? sat_uu((unsigned __int128)a << (sh > 64 ? 64 : sh), sz)
-                              : sat_s(shl128(sa, sh > 64 ? 64 : sh), sz);
+            if (sat) return u ? sat_uu(c, (unsigned __int128)a << (sh > 64 ? 64 : sh), sz)
+                              : sat_s(c, shl128(sa, sh > 64 ? 64 : sh), sz);
             return sh >= es ? 0 : a << sh;
         }
         return u ? (uint64_t)lshr_u(a, -sh, rnd) : (uint64_t)lshr_s(sa, -sh, rnd);
     }
     case LOP_SHLI: return a << b;
-    case LOP_QSHLI: return u ? sat_uu((unsigned __int128)a << b, sz) : sat_s(shl128(sa, (int)b), sz);
-    case LOP_QSHLUI: return sat_u(shl128(sa, (int)b), sz);
+    case LOP_QSHLI: return u ? sat_uu(c, (unsigned __int128)a << b, sz) : sat_s(c, shl128(sa, (int)b), sz);
+    case LOP_QSHLUI: return sat_u(c, shl128(sa, (int)b), sz);
     case LOP_SHRI: return u ? (uint64_t)lshr_u(a, (int)b, 0) : (uint64_t)lshr_s(sa, (int)b, 0);
     case LOP_RSHRI: return u ? (uint64_t)lshr_u(a, (int)b, 1) : (uint64_t)lshr_s(sa, (int)b, 1);
     case LOP_SRAI: return d + (u ? (uint64_t)lshr_u(a, (int)b, 0) : (uint64_t)lshr_s(sa, (int)b, 0));
@@ -499,11 +510,11 @@ SI uint64_t lop(int op, int sz, uint64_t a, uint64_t b, uint64_t d) {
         return (d & ~m) | ((int)b >= es ? 0 : a >> b);
     }
     case LOP_SLI: { uint64_t m = (lmask(sz) << b) & lmask(sz); return (d & ~m) | ((a << b) & m); }
-    case LOP_SQDMULH: return sat_s(((__int128)sa * sb * 2) >> es, sz);
-    case LOP_SQRDMULH: return sat_s(((__int128)sa * sb * 2 + ((__int128)1 << (es - 1))) >> es, sz);
+    case LOP_SQDMULH: return sat_s(c, ((__int128)sa * sb * 2) >> es, sz);
+    case LOP_SQRDMULH: return sat_s(c, ((__int128)sa * sb * 2 + ((__int128)1 << (es - 1))) >> es, sz);
     case LOP_PMUL: return pmul64(a, b, 0);
-    case LOP_SQABS: return sat_s(sa < 0 ? -(__int128)sa : sa, sz);
-    case LOP_SQNEG: return sat_s(-(__int128)sa, sz);
+    case LOP_SQABS: return sat_s(c, sa < 0 ? -(__int128)sa : sa, sz);
+    case LOP_SQNEG: return sat_s(c, -(__int128)sa, sz);
     case LOP_ABS: return sa < 0 ? (uint64_t)-sa : (uint64_t)sa;
     case LOP_NEG: return -a;
     case LOP_CLS: {
@@ -529,24 +540,24 @@ SI uint64_t lop(int op, int sz, uint64_t a, uint64_t b, uint64_t d) {
     case LOP_MULL: return (uint64_t)(xa * xb);
     case LOP_ADDW: return a + (uint64_t)xb;
     case LOP_SUBW: return a - (uint64_t)xb;
-    case LOP_SQDMULL: return sat_s((__int128)sa * sb * 2, sz + 1);
-    case LOP_SQDMLAL: return sat_s((__int128)lsx(d, sz + 1) + (__int128)lsx(sat_s((__int128)sa * sb * 2, sz + 1), sz + 1), sz + 1);
-    case LOP_SQDMLSL: return sat_s((__int128)lsx(d, sz + 1) - (__int128)lsx(sat_s((__int128)sa * sb * 2, sz + 1), sz + 1), sz + 1);
+    case LOP_SQDMULL: return sat_s(c, (__int128)sa * sb * 2, sz + 1);
+    case LOP_SQDMLAL: return sat_s(c, (__int128)lsx(d, sz + 1) + (__int128)lsx(sat_s(c, (__int128)sa * sb * 2, sz + 1), sz + 1), sz + 1);
+    case LOP_SQDMLSL: return sat_s(c, (__int128)lsx(d, sz + 1) - (__int128)lsx(sat_s(c, (__int128)sa * sb * 2, sz + 1), sz + 1), sz + 1);
     case LOP_PMULL: return pmul64(a, b, 0);
     case LOP_SHLL: return a << es;
     // narrowing: a (and b for xHN) are 2*es wide
     case LOP_XTN: return a;
-    case LOP_SQXTN: return sat_s(lsx(a, sz + 1), sz);
-    case LOP_UQXTN: return sat_u(a, sz);
-    case LOP_SQXTUN: return sat_u(lsx(a, sz + 1), sz);
+    case LOP_SQXTN: return sat_s(c, lsx(a, sz + 1), sz);
+    case LOP_UQXTN: return sat_u(c, a, sz);
+    case LOP_SQXTUN: return sat_u(c, lsx(a, sz + 1), sz);
     case LOP_SHRN: return a >> b;
     case LOP_RSHRN: return (uint64_t)lshr_u(a, (int)b, 1);
     case LOP_QSHRN: case LOP_QRSHRN: {
         int rnd = op == LOP_QRSHRN;
-        return u ? sat_u((__int128)lshr_u(a, (int)b, rnd), sz) : sat_s(lshr_s(lsx(a, sz + 1), (int)b, rnd), sz);
+        return u ? sat_u(c, (__int128)lshr_u(a, (int)b, rnd), sz) : sat_s(c, lshr_s(lsx(a, sz + 1), (int)b, rnd), sz);
     }
-    case LOP_QSHRUN: return sat_u(lshr_s(lsx(a, sz + 1), (int)b, 0), sz);
-    case LOP_QRSHRUN: return sat_u(lshr_s(lsx(a, sz + 1), (int)b, 1), sz);
+    case LOP_QSHRUN: return sat_u(c, lshr_s(lsx(a, sz + 1), (int)b, 0), sz);
+    case LOP_QRSHRUN: return sat_u(c, lshr_s(lsx(a, sz + 1), (int)b, 1), sz);
     case LOP_ADDHN: return (a + b) >> es;
     case LOP_RADDHN: return (a + b + (1ull << (es - 1))) >> es;
     case LOP_SUBHN: return (a - b) >> es;
@@ -564,7 +575,7 @@ SI void sl_gen(Cpu *c, int op, int sz, int ne, int d, int szd, int offd, int kee
     u128 a = c->v[n], b = m >= 0 ? c->v[m] : 0, o = c->v[d], r = keep ? o : 0;
     for (int i = 0; i < ne; i++) {
         uint64_t y = m < 0 ? bimm : lget(&b, szm, bidx >= 0 ? bidx : offm + i);
-        lset(&r, szd, offd + i, lop(op, sz, lget(&a, szn, offn + i), y, lget(&o, szd, offd + i)));
+        lset(&r, szd, offd + i, lop(c, op, sz, lget(&a, szn, offn + i), y, lget(&o, szd, offd + i)));
     }
     c->v[d] = r;
 }

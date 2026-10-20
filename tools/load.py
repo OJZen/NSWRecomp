@@ -18,6 +18,7 @@ HEADER = struct.Struct('<15Q')
 MASK64 = (1 << 64) - 1
 R_NONE, R_ABS64, R_GLOB_DAT, R_JUMP_SLOT, R_RELATIVE = 0, 257, 1025, 1026, 1027
 RUNTIME = ('probe.c', 'load.c', 'load.h')
+ADDRESS_UNAVAILABLE = 75  # runtime/load.h; distinct from table/CLI validation failures.
 
 
 def contains(start, size, address, length):
@@ -181,6 +182,18 @@ def verify_build(infos):
     return record['executable_sha256']
 
 
+def native_load(plan):
+    for attempt in range(1, 9):
+        result = subprocess.run([str(BUILD / 'link-probe'), '--load-only', str(plan)],
+                                capture_output=True, text=True, timeout=60)
+        if result.returncode == ADDRESS_UNAVAILABLE:  # A fresh process may have a different ASLR reservation.
+            continue
+        if result.returncode:
+            raise ValueError('native load-only failed: ' + result.stderr.strip())
+        return json.loads(result.stdout), attempt
+    raise ValueError('fixed guest address unavailable after 8 process attempts')
+
+
 def worker(exefs, output):
     infos = verify(exefs)
     executable_sha = verify_build(infos)
@@ -194,17 +207,13 @@ def worker(exefs, output):
     with tempfile.TemporaryDirectory(prefix='load-', dir=output.parent) as temp:
         plan = Path(temp) / 'image.plan'
         planned = write_plan(plan, modules)
-        result = subprocess.run([str(BUILD / 'link-probe'), '--load-only', str(plan)],
-                                capture_output=True, text=True, timeout=60)
-        if result.returncode:
-            raise ValueError('native load-only failed: ' + result.stderr.strip())
-        native = json.loads(result.stdout)
+        native, attempts = native_load(plan)
         if (native['modules'] != len(modules) or native['game_executed'] is not False
                 or any(native[key] != sum(m[key] for m in planned.values())
                        for key in ('relocations', 'init_functions', 'entry_functions'))):
             raise ValueError('native loading differs from the prepared plan')
         write_json(output, {'status': 'native_load_only_verified', 'modules': planned,
-                           'native': native, 'plan_bytes': plan.stat().st_size,
+                           'native': native, 'address_space_attempts': attempts, 'plan_bytes': plan.stat().st_size,
                            'executable_sha256': executable_sha, 'runtime_sources': runtime_sources(),
                            'planner_sha256': digest(Path(__file__)), 'input_sha256': {n: i['sha256'] for n, i in infos.items()},
                            'game_executed': False, 'initialization_executed': False})

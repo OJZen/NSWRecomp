@@ -343,7 +343,7 @@ class SimdC:
         if opc == 0:
             return same(lop('HADD', U), sz, ne, d, n, m)
         if opc == 1:
-            return VWr(T, Q, d, f'({T})__builtin_elementwise_{"add"}_sat({x}, {y})')
+            return same(lop('UQADD' if U else 'SQADD'), sz, ne, d, n, m)
         if opc == 2:
             return same(lop('RHADD', U), sz, ne, d, n, m)
         if opc == 3:
@@ -355,7 +355,7 @@ class SimdC:
         if opc == 4:
             return same(lop('HSUB', U), sz, ne, d, n, m)
         if opc == 5:
-            return VWr(T, Q, d, f'({T})__builtin_elementwise_sub_sat({x}, {y})')
+            return same(lop('UQSUB' if U else 'SQSUB'), sz, ne, d, n, m)
         if opc == 6:
             return VWr(T, Q, d, f'({T})({x} > {y})')
         if opc == 7:
@@ -930,13 +930,13 @@ class SimdC:
         F, VT, VU, T, SF, SU, SET = FT[t]
         n, m, zero = bits(w, 5, 5), bits(w, 16, 5), bits(w, 3, 1)
         b = '0' if zero else f'{SF}({m})'
-        return f'c->nzcv = cmp_{F}(c, {SF}({n}), {b});'
+        return f'c->nzcv = cmp_{F}(c, {SF}({n}), {b}, {bits(w, 4, 1)});'
 
     def fp_ccmp(self, w):
         t = self._ftype(w)
         F, VT, VU, T, SF, SU, SET = FT[t]
         n, m, cnd, nzcv = bits(w, 5, 5), bits(w, 16, 5), bits(w, 12, 4), bits(w, 0, 4)
-        return f'c->nzcv = {cond(cnd)} ? cmp_{F}(c, {SF}({n}), {SF}({m})) : {hx(nzcv << 28)};'
+        return f'c->nzcv = {cond(cnd)} ? cmp_{F}(c, {SF}({n}), {SF}({m}), {bits(w, 4, 1)}) : {hx(nzcv << 28)};'
 
     def fp_csel(self, w):
         t = self._ftype(w)

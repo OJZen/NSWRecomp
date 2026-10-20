@@ -26,15 +26,21 @@ int main(int argc, char **argv) {
         uintptr_t guard_base = BASE + (mode == 3 ? 0x10000 : 0);
 #ifdef __APPLE__
         mach_vm_address_t address = guard_base;
-        assert(mach_vm_allocate(mach_task_self(), &address, 65536, VM_FLAGS_FIXED) == KERN_SUCCESS);
+        kern_return_t result = mach_vm_allocate(mach_task_self(), &address, 65536, VM_FLAGS_FIXED);
+        if (result == KERN_NO_SPACE) return LOAD_ADDRESS_UNAVAILABLE;
+        assert(result == KERN_SUCCESS);
         unsigned char *guard = (void *)(uintptr_t)address;
 #else
         unsigned char *guard = mmap((void *)guard_base, 65536, PROT_READ | PROT_WRITE,
                                    MAP_PRIVATE | MAP_ANON, -1, 0);
 #endif
-        assert(guard == (void *)guard_base);
+        if (guard == MAP_FAILED) return LOAD_INVALID;
+        if (guard != (void *)guard_base) {
+            munmap(guard, 65536);
+            return LOAD_ADDRESS_UNAVAILABLE;
+        }
         guard[0] = 73;
-        assert(load_plan(argv[1], &image, has_function));
+        assert(load_plan(argv[1], &image, has_function) == LOAD_ADDRESS_UNAVAILABLE);
         assert(!image.count && guard[0] == 73);
 #ifdef __APPLE__
         mach_vm_deallocate(mach_task_self(), address, 65536);
@@ -45,7 +51,8 @@ int main(int argc, char **argv) {
         unload_image(&image);
         return 0;
     }
-    if (load_plan(argv[1], &image, has_function)) return 1;
+    int result = load_plan(argv[1], &image, has_function);
+    if (result) return result;
     assert(image.count == 2 && image.entry_functions == 1 && image.init_functions == 3);
     unsigned char *first = image.modules[0].memory;
     uint64_t *data = (uint64_t *)(first + image.modules[0].header.data_offset);

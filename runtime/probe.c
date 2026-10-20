@@ -63,7 +63,8 @@ int main(int argc, char **argv) {
     }
     if (argc == 3 && !strcmp(argv[1], "--load-only")) {
         LoadedImage image = {0};
-        if (load_plan(argv[2], &image, has_function)) return 1;
+        int result = load_plan(argv[2], &image, has_function);
+        if (result) return result;
         if (image.count != sizeof tables / sizeof *tables) { unload_image(&image); return 1; }
         printf("{\"modules\":%zu,\"mapped_bytes\":%llu,\"host_page_bytes\":%zu,"
                "\"mixed_permission_pages\":%zu,\"relocations\":%llu,\"init_functions\":%llu,"
