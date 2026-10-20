@@ -2280,21 +2280,21 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
         }
         NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
         NSString *zh = g_shmap[k];
-        if (!zh) {   // 不在包里：查 main 本体内嵌的计算核（nvn_builtin.h） | Not in the package: look up the compute kernels embedded in the main body (nvn_builtin.h)
-            NvShader *b = nil;
-            if (b) { o->sh[5] = b; continue; }
+        NSString *library = [g_msl_dir stringByAppendingPathComponent:[k stringByAppendingString:@"_b.metallib"]];
+        if (!zh || ![NSFileManager.defaultManager fileExistsAtPath:library]) {
+            NSMutableArray<NSString *> *needed = [NSMutableArray new];
             for (unsigned j = 0; j < p->nstage; j++) {
             const NVNshaderData *sd = &p->sd[j]; uint8_t hash[32];
             if (!zelda_shader_hash(sd->control, (const void *)(uintptr_t)sd->data, hash)) MDIE("Invalid runtime shader");
             NSString *key = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]];
-            if (g_shmap[key]) continue;
+            [needed addObject:key];
             NSMutableData *record = [NSMutableData dataWithBytes:sd->control length:shader_word(sd->control, 0x20)];
             [record appendBytes:(const void *)(uintptr_t)sd->data length:shader_word(sd->control, 0x704)];
             NSString *path = [NSString stringWithFormat:@"work/shaders/source/runtime-%@.nvn", key];
             if (![record writeToFile:path options:NSDataWritingAtomic error:NULL]) MDIE("Cannot capture runtime shader");
         }
         MLOG("Captured Zelda shader %s", k.UTF8String);
-        zelda_compile_shaders();
+        zelda_compile_shaders(needed);
         g_shmap = nil; shmap_load(); zh = g_shmap[k];
         if (!zh) { MLOG("BLOCKED shader %s absent after indexing", k.UTF8String); exit(78); }
         }
@@ -3440,10 +3440,11 @@ static void pso_predict_rest(void) {
             zelda_fragment_function((__bridge NvShader *)pending->fs, pending->k.cfmt);
         }
         z_variant_collect = 0;
-        if (!z_variant_missing) break;
+        if (!z_variant_requests.count) break;
         if (attempt) { MLOG("BLOCKED shader variants remain unsupported after compilation"); exit(78); }
         MLOG("VARIANT_SCAN draws=%d primary=%d fallback=%d", draws, na, nb);
-        zelda_compile_shaders(); z_variant_missing = 0;
+        zelda_compile_shaders(z_variant_requests.allObjects);
+        [z_variant_requests removeAllObjects];
     }
     for (int i = 0; i < na; i++) pso_pend_kick(&qa[i].k, (__bridge NvShader *)qa[i].vs, (__bridge NvShader *)qa[i].fs);
     for (int i = 0; i < nb; i++) pso_pend_kick(&qb[i].k, (__bridge NvShader *)qb[i].vs, (__bridge NvShader *)qb[i].fs);

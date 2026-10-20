@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 from build_shaders import ROOT, TOOLS, XLATE, shader_entries
@@ -18,11 +19,22 @@ def valid(entry, output):
 
 
 def translate():
-    output = ROOT / 'work/shaders/spv'; output.mkdir(parents=True, exist_ok=True)
+    output = ROOT / 'work/shaders/spv'
+    if any(p.is_symlink() for p in (output, output.parent, output.parent.parent)):
+        raise ValueError('shader cache must not be a symlink')
+    output.mkdir(parents=True, exist_ok=True)
     entries = shader_entries(output.parent)
     version = hashlib.sha256(Path(__file__).read_bytes() + b''.join(p.read_bytes() for p in sorted(XLATE.glob('*.dll')))).hexdigest()
     stamp = output / 'translator.sha256'
+    if stamp.is_symlink(): raise ValueError('translator stamp must not be a symlink')
     current = stamp.exists() and stamp.read_text().strip() == version
+    if not current:
+        # A new translator invalidates every cached result, including shaders requested later.
+        for path in output.iterdir():
+            if re.fullmatch(r'[0-9a-f]{16}(?:-[0-9a-f]{4}(?:[0-9a-f]{4})?)?\.(?:spv|res\.json)', path.name):
+                if path.is_symlink() or not path.is_file(): raise ValueError('invalid SPIR-V cache output')
+                path.unlink()
+        stamp.write_text(version + '\n')
     # The upstream AST optimizer silently drops BRX cases used for glyph coordinates and UI panels.
     jobs = [dict(e, code=str(output.parent / 'code' / (e.get('base', e['key']) + '.bin')), debug=True)
             for e in entries if not current or not valid(e, output)]

@@ -28,7 +28,8 @@ static unsigned zelda_vertex_input_class(int format) {
     return format >= 0x51 && format <= 0x68 ? 0 : zelda_vertex_class(vfmt(format));
 }
 
-static int z_variant_collect, z_variant_missing;
+static int z_variant_collect;
+static NSMutableSet<NSString *> *z_variant_requests;
 static int z_warming;   // startup warm-up (nvn_shader_warm.inc): a missing variant is skipped, never captured or compiled
 static void pso_predict_rest(void);
 static inline int zelda_uniform_linked_source(int layout) {
@@ -62,15 +63,16 @@ static id<MTLFunction> zelda_shader_variant(NvShader *shader, unsigned mask, int
         NSString *path = [directory stringByAppendingPathComponent:[key stringByAppendingString:@".json"]];
         if (!data || ![data writeToFile:path options:NSDataWritingAtomic error:nil]) MDIE("Cannot save shader variant");
         MLOG("Captured Zelda %s variant %s batch=%d", stage == 0 ? "vertex" : "fragment", key.UTF8String, z_variant_collect);
-        z_variant_missing = 1;
-        if (z_variant_collect) return nil;
+        if (z_variant_collect) {
+            if (!z_variant_requests) z_variant_requests = [NSMutableSet new];
+            [z_variant_requests addObject:key]; return nil;
+        }
         // A later miss can lie beyond this submit's earlier precompile scan.
         pso_predict_rest();
-        if (![NSFileManager.defaultManager fileExistsAtPath:library]) zelda_compile_shaders();
+        if (![NSFileManager.defaultManager fileExistsAtPath:library]) zelda_compile_shaders(@[key]);
         if (![NSFileManager.defaultManager fileExistsAtPath:library]) {
             MLOG("BLOCKED shader variant %s remains unsupported", key.UTF8String); exit(78);
         }
-        z_variant_missing = 0;
     }
     NvShader *variant = shader_get(name, stage);
     if (!variant || variant->rf.nb != shader->rf.nb || variant->rf.abi != shader->rf.abi ||

@@ -26,7 +26,11 @@ def point_size_limit_misuse(source):
     return bool(re.search(r'_c0\)\._m0\[%du?\](?!\.x\b)' % (POINT_SIZE_LIMIT // 16), source))
 
 
-def shader_entries(directory):
+def shader_entries(directory, requested=None):
+    if requested is not None:
+        requested = set(requested)
+        if not requested or any(not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{16}(?:-[0-9a-f]{4}(?:[0-9a-f]{4})?)?', key) for key in requested):
+            raise ValueError('invalid requested shader key')
     entries = json.loads((directory / 'index.json').read_text())
     if (not isinstance(entries, list) or any(not isinstance(e, dict) or
             not re.fullmatch(r'[0-9a-f]{16}', str(e.get('key', ''))) or
@@ -34,7 +38,9 @@ def shader_entries(directory):
         raise ValueError('invalid shader index')
     bases = {entry['key']: entry for entry in entries}
     if len(bases) != len(entries): raise ValueError('duplicate shader index key')
+    if requested is not None: entries = [entry for entry in entries if entry['key'] in requested]
     for path in sorted((directory / 'variants').glob('*.json')):
+        if requested is not None and path.stem not in requested: continue
         request = json.loads(path.read_text())
         base, mask = request['base'], request['mask']
         stage = bases.get(base, {}).get('stage')
@@ -55,6 +61,8 @@ def shader_entries(directory):
         entry = dict(bases[base], key=path.stem, base=base, **{'attr' if stage == 'vs' else 'fout': types})
         if next_stage: entry['next'] = bases[next_stage]
         entries.append(entry)
+    if requested is not None and {entry['key'] for entry in entries} != requested:
+        raise ValueError('requested shader capture is missing')
     return entries
 
 

@@ -21,7 +21,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -42,6 +42,7 @@ class StateTableTests(unittest.TestCase):
                     code.update({0x98: 'mov w0, #44', 0x9c: 'ret', 0xd0: 'and w6, w0, #3',
                                  0xd4: 'cbz x5, .+28', 0xd8: 'add w6, w6, #5' if clobber else 'nop',
                                  0xe0: 'ldrb w3, [x1, x6]'})
+                    if compare_mask: code.update({0xd4: 'cmp w6, #0', 0xd8: 'b.eq .-88'})
                     if alternate: code.update({0xd4: 'cbnz x5, .+8', 0xd8: 'br x7'})
                     code[0x64] = 'b .+108'
                     if far_mask: code.update({0x64: 'and w6, w0, #3', 0x68: 'b .+108', 0xd0: 'nop'})
@@ -58,6 +59,12 @@ class StateTableTests(unittest.TestCase):
                                 *(['nop'] * (scheduled - len(extra))), 'br x2',
                                 'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret', 'mov w0, #99', 'ret']
                 entry, fmt, values = 0x80, '<4H', (0, 2, 4, 0xffff)
+            elif independent_guard:
+                instructions = ['cmp w4, #2', 'b.hi .+48', f'adr x1, .+{table - 0x88}', 'adr x2, .+16',
+                                'ldrb w3, [x1, x0]', 'add x2, x2, x3, lsl #2', 'br x2',
+                                'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret',
+                                'mov w0, #99', 'ret']
+                branch, entry, cases, fmt, values = 0x98, 0x80, [0x9c, 0xa4, 0xac], '<4B', (0, 2, 4, 0xff)
             elif width == 4:
                 instructions = ['b .+20', 'mov w0, #11', 'ret', 'mov w0, #22', 'ret',
                                 f'adr x1, .+{table - 0x94}', 'adr x2, .', 'ldrsw x3, [x1, x0, lsl #2]',
@@ -115,6 +122,12 @@ uint64_t rt_ticks(void) { abort(); }
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_state_index_is_not_bounded_by_an_unrelated_guard(self):
+        self.check_table(1, independent_guard=True)
+
+    def test_comparison_alias_does_not_clobber_a_masked_index(self):
+        self.check_table(1, distant=True, masked=True, compare_mask=True)
 
     def test_guarded_distant_base_ignores_unmapped_object_reads(self):
         self.check_table(1, distant=True, unmapped=True)

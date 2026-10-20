@@ -158,6 +158,15 @@ class Module:
             return None
         return low, high
 
+    @staticmethod
+    def _register_access(instruction):
+        reads, writes = instruction.regs_access()
+        if instruction.id in (C.ARM64_INS_CMP, C.ARM64_INS_CMN, C.ARM64_INS_TST):
+            # Some Capstone versions retain the removed destination's access on these aliases.
+            operands = {o.reg for o in instruction.operands if o.type == C.ARM64_OP_REG}
+            return sorted(set(reads) | operands), sorted(set(writes) - operands)
+        return reads, writes
+
     def _table_compare(self, pc, condition):
         """Index/count for an unsigned table guard; CCMP's fallback must skip the table."""
         word = self.word(pc)
@@ -202,7 +211,7 @@ class Module:
                 instruction = instructions[i]
                 if instruction.group(capstone.CS_GRP_JUMP) or instruction.group(capstone.CS_GRP_CALL) or instruction.group(capstone.CS_GRP_RET):
                     return None
-                if register in (reg(r) for r in instruction.regs_access()[1]):
+                if register in (reg(r) for r in self._register_access(instruction)[1]):
                     return i
             return None
 
@@ -283,7 +292,7 @@ class Module:
                 for previous in predecessors[at]:
                     instruction = mask_instructions[previous]
                     if instruction.group(capstone.CS_GRP_CALL): valid = False
-                    elif indexed in (reg(r) for r in instruction.regs_access()[1]):
+                    elif indexed in (reg(r) for r in self._register_access(instruction)[1]):
                         if previous not in masks: valid = False
                         else: counts.add(masks[previous])
                     else: pending.append(previous)
@@ -297,6 +306,23 @@ class Module:
         ro_start = self.base + self.nso.rodata[0]
         ro_end = ro_start + self.nso.rodata[1]
         if table is not None and (not ro_start <= table < ro_end or table % width): return None
+
+        def state_targets():
+            if table is None: return None
+            targets = set()
+            for i in range(4096):
+                at = table + i * width
+                if at + width > ro_end: break
+                offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
+                target = case_base + (offset << operands[2].shift.value)
+                if not low <= target < high or not self.in_text(target): break
+                targets.add(target)
+            else:
+                return None
+            if len(targets) < 2: return None
+            self.stats['state_tables'] += 1
+            return sorted(targets)
+
         if guards:
             guard_at = guards[-1]
             guard_word = self.word(instructions[guard_at].address)
@@ -318,6 +344,11 @@ class Module:
             if compare_at is None: return None
             compared, count = comparison
             indexed, before = reg(memory.mem.index), load_at
+            if indexed is None: return None
+            if indexed != compared and not any(indexed in (reg(r) for r in self._register_access(i)[1])
+                                               for i in instructions[compare_at + 1:load_at]):
+                # A guard of another value does not bound this untouched state index.
+                return state_targets()
             required_mask = (1 << (count - 1).bit_length()) - 1
             while indexed != compared:
                 copy_at = writer(indexed, before)
@@ -332,7 +363,7 @@ class Module:
                 else:
                     return None
                 before = copy_at
-            if any(compared in (reg(r) for r in i.regs_access()[1]) for i in instructions[compare_at + 1:before]):
+            if any(compared in (reg(r) for r in self._register_access(i)[1]) for i in instructions[compare_at + 1:before]):
                 return None
             if table is None:
                 if br_pc - low > 4 * 4096: return None
@@ -348,20 +379,7 @@ class Module:
                 targets.add(target)
             self.stats['static_guard_tables'] += 1
             return sorted(targets)
-        if table is None: return None
-        targets = set()
-        for i in range(4096):
-            at = table + i * width
-            if at + width > ro_end: break
-            offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
-            target = case_base + (offset << operands[2].shift.value)
-            if not low <= target < high or not self.in_text(target): break
-            targets.add(target)
-        else:
-            return None
-        if len(targets) < 2: return None
-        self.stats['state_tables'] += 1
-        return sorted(targets)
+        return state_targets()
 
     def _index_regs(self, start, at, idx):
         """The index register plus registers holding the same value in start..at: sources it was
@@ -403,7 +421,7 @@ class Module:
         needed, reads = {f'x{bits(self.word(br_pc), 5, 5)}'}, set()
         instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
         for instruction in reversed(instructions):
-            inputs, outputs = instruction.regs_access()
+            inputs, outputs = self._register_access(instruction)
             written = {register(r) for r in outputs}
             if needed & written:
                 needed.difference_update(written)

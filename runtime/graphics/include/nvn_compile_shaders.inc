@@ -1,5 +1,5 @@
 #include <TargetConditionals.h>
-static void zelda_compile_shaders(void) {
+static void zelda_compile_shaders(NSArray<NSString *> *keys) {
 #if TARGET_OS_IPHONE
     // Captured requests remain in Documents/work/shaders for the Mac preparation tool.
     MDIE("Shader translation is required on the Mac; export work/shaders requests, prepare them, and sync back to iOS");
@@ -13,7 +13,8 @@ static void zelda_compile_shaders(void) {
         if (!output) MDIE("Cannot open runtime shader build log");
         NSTask *task = [NSTask new];
         task.executableURL = [NSURL fileURLWithPath:[root stringByAppendingPathComponent:@"work/venv/bin/python"]];
-        task.arguments = @[@"tools/compile_runtime_shaders.py"];
+        if (!keys.count) MDIE("Empty runtime shader request");
+        task.arguments = [@[@"tools/compile_runtime_shaders.py"] arrayByAddingObjectsFromArray:keys];
         NSMutableDictionary *environment = [NSProcessInfo.processInfo.environment mutableCopy];
         environment[@"PYTHONDONTWRITEBYTECODE"] = @"1";
         environment[@"TMPDIR"] = [root stringByAppendingPathComponent:@"work/tmp/"];
