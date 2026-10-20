@@ -18,14 +18,28 @@ Development dependencies are installed separately, not vendored or linked into a
 
 [Zelda-Mobile](https://github.com/OJZen/totk-mobile) is a reference for the v1.4.3
 input fingerprints and runtime boundaries. No game data from its checkout is
-included here. `runtime/kernel.c` adapts
-its committed memory-service implementation, under Apache-2.0; the original
+included here. The memory, IPC, filesystem and audio sources in `runtime/`, and
+`tests/native_services.c`, adapt its committed implementations under Apache-2.0; the original
 license and pinned source digest are in `third_party/zelda-mobile/`. The local
 adaptation uses this project's loaded module metadata and guest stack. Its
 address-space layout follows d2r-mobile; that MIT notice is retained under
-`third_party/zelda-mobile/d2r/LICENSE`. Building
+`third_party/zelda-mobile/d2r/LICENSE`. `runtime/threads.c` adapts the MIT thread
+and synchronization algorithms to C CPU dispatch, independent guest stacks,
+retained wait-object references and cooperative shutdown. The audio output
+design also follows d2r-mobile's CoreAudio queue. Building
 does not read the neighboring reference repository. Nintendo properties and user-supplied game files
 are not covered by this project's or LASRecomp's license.
+
+The startup probe links the separately installed [Opus](https://opus-codec.org/license/)
+library (BSD 3-clause, installed version 1.6.1 in the validation environment).
+Its source, headers and library are not vendored. Apple AudioToolbox/CoreAudio
+are system frameworks. Synthetic audio tests run with speaker output disabled;
+they do not establish audible game playback.
+
+The NVN API headers under `third_party/zelda-mobile/core/gfx/nvn/` are retained
+byte-for-byte from the same pinned source. `include/nvn.h` keeps its MIT notice,
+copyright 2020 h1k421; the generated prototype header is part of the d2r-mobile
+MIT subset. They describe the host interface and contain no game resources.
 
 The local Ryujinx/Ryubing (root MIT) and Eden (GPLv3-or-later) checkouts were
 reviewed as references only. No code from either is included or linked here.

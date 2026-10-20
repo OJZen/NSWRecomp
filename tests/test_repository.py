@@ -11,7 +11,7 @@ class RepositoryTests(unittest.TestCase):
         result = subprocess.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
                                 cwd=ROOT, capture_output=True, check=True)
         allowed_names = {'.gitignore', 'Makefile', 'LICENSE'}
-        allowed_suffixes = {'.c', '.h', '.py', '.md', '.json', '.txt'}
+        allowed_suffixes = {'.c', '.h', '.inc', '.py', '.md', '.json', '.txt'}
         for raw in result.stdout.split(b'\0'):
             if not raw:
                 continue

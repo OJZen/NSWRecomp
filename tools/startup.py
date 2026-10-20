@@ -2,6 +2,7 @@
 import argparse
 import fcntl
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -12,10 +13,18 @@ from bounded import run
 from build import BUILD, FLAGS, RUNTIME, object_list, write_json
 from load import ADDRESS_UNAVAILABLE, Module, symbol_scope, verify_build, write_plan
 from recompile import ROOT, VENDOR, Nso, digest, prepare_work, verify
+from resources import verify_romfs
 
 STAGES = ('_init_libc0', 'nnosInitialize', '_init_libc1', 'nninitInitializeSdkModule',
           'nninitStartup', '_init_libc2', 'nnMain')
-SOURCES = (*RUNTIME, 'startup.c', 'kernel.c', 'kernel.h', 'threads.c', 'threads.h')
+SOURCES = (*RUNTIME, 'startup.c', 'kernel.c', 'kernel.h', 'threads.c', 'threads.h',
+           'services.c', 'services.h', 'filesystem.c', 'filesystem.h', 'audio.c', 'audio.h',
+           'audio_mixer.c', 'audio_mixer.h', 'audio_voice.h', 'audio_output.inc', 'audio_effects.inc', 'mach_memory.h')
+
+
+def platform_flags():
+    return shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'opus'], text=True, timeout=10)) + [
+        '-framework', 'AudioToolbox', '-framework', 'CoreAudio']
 
 
 def entries(modules):
@@ -31,7 +40,23 @@ def entries(modules):
     return addresses
 
 
-def worker(exefs, through, executable, output):
+def native_report(stdout, returncode, through):
+    report = json.loads(stdout) if stdout.strip() else None
+    if report is None and returncode:
+        return None
+    if (not isinstance(report, dict) or report.get('title_verified') is not False
+            or type(report.get('completed_stages')) is not int
+            or not 0 <= report['completed_stages'] <= STAGES.index(through) + 1
+            or (not returncode and report['completed_stages'] != STAGES.index(through) + 1)
+            or type(report.get('function_calls')) is not int or report['function_calls'] < 0
+            or any(type(report.get(k)) is not bool for k in ('constructors_completed', 'entered_nnMain', 'initialization_executed'))
+            or (report['constructors_completed'] and report['completed_stages'] < 6)
+            or (report['entered_nnMain'] and (not report['constructors_completed'] or through != 'nnMain'))):
+        raise ValueError('invalid native startup report')
+    return report
+
+
+def worker(exefs, through, executable, output, romfs=None):
     infos = verify(exefs)
     modules = []
     for name, info in infos.items():
@@ -42,20 +67,25 @@ def worker(exefs, through, executable, output):
     addresses = entries(modules)
     plan = output.parent / 'image.plan'
     write_plan(plan, modules)
+    environment = dict(os.environ)
+    resource = verify_romfs(romfs) if romfs else None
+    if resource: environment['ZELDA_ROMFS'] = resource['path']
+    else: environment.pop('ZELDA_ROMFS', None)
     command = [str(executable), str(plan), str(STAGES.index(through) + 1), *map(hex, addresses)]
     for attempt in range(1, 9):
-        result = subprocess.run(command, capture_output=True, text=True, timeout=35)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=35, env=environment)
         if result.returncode != ADDRESS_UNAVAILABLE:
             break
     print(result.stderr, end='', flush=True)
-    native = json.loads(result.stdout) if result.returncode == 0 else None
-    write_json(output, {'status': 'startup_checkpoint' if native else 'startup_stopped',
+    native = native_report(result.stdout, result.returncode, through)
+    write_json(output, {'status': 'startup_checkpoint' if result.returncode == 0 else 'startup_stopped',
                        'exit_code': result.returncode, 'through': through, 'native': native,
                        'address_space_attempts': attempt, 'title_verified': False,
+                       'resource': resource,
                        'input_sha256': {name: info['sha256'] for name, info in infos.items()}})
 
 
-def startup(exefs, through):
+def startup(exefs, through, romfs=None):
     prepare_work()
     directory = ROOT / 'work/startup'
     if directory.is_symlink():
@@ -74,13 +104,15 @@ def startup(exefs, through):
             response = temp / 'link.rsp'
             command = [*FLAGS, '-DTOTK_LINK_ALL', '-DTOTK_STARTUP', '-I', str(VENDOR / 'runtime'),
                        *[str(ROOT / 'runtime' / name) for name in SOURCES if name.endswith('.c')],
-                       *map(str, objects), '-lm', '-o', str(candidate)]
+                       *map(str, objects), *platform_flags(), '-lm', '-o', str(candidate)]
             response.write_text(shlex.join(command) + '\n')
             link = run(['clang', '@' + str(response)], cwd=ROOT, log=ROOT / 'work/logs/startup-link.log', seconds=120)
             candidate.replace(directory / 'probe')
             output = temp / 'result.json'
-            execution = run([sys.executable, str(Path(__file__).resolve()), '--exefs', str(exefs),
-                             '--through', through, '--worker-result', str(output)],
+            command = [sys.executable, str(Path(__file__).resolve()), '--exefs', str(exefs),
+                       '--through', through, '--worker-result', str(output)]
+            if romfs: command += ['--romfs', str(romfs.resolve())]
+            execution = run(command,
                             cwd=ROOT, log=ROOT / 'work/logs/startup.log', seconds=120)
             result = json.loads(output.read_text())
             result.update(link=link, execution=execution, executable_sha256=digest(directory / 'probe'),
@@ -94,13 +126,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--exefs', type=Path, required=True)
     parser.add_argument('--through', choices=STAGES, default='nnMain')
+    parser.add_argument('--romfs', type=Path, help='unmodified merged v1.4.3 RomFS; verified read-only')
     parser.add_argument('--worker-result', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         if args.worker_result:
-            worker(args.exefs, args.through, ROOT / 'work/startup/probe', args.worker_result)
+            worker(args.exefs, args.through, ROOT / 'work/startup/probe', args.worker_result, args.romfs)
         else:
-            result = startup(args.exefs.resolve(), args.through)
+            result = startup(args.exefs.resolve(), args.through, args.romfs)
             print(json.dumps(result, indent=2))
             if result['exit_code']:
                 parser.exit(2, 'startup stopped before its requested checkpoint; see work/logs/startup.log\n')

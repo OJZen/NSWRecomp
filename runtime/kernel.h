@@ -9,3 +9,8 @@ bool kernel_access(uint64_t address, size_t size, unsigned permissions);
 uint32_t kernel_readonly_page(const void *data);
 uint32_t kernel_readonly_memory(const void *data, size_t size);
 bool kernel_transfer_memory(uint32_t handle, uint64_t *address, uint64_t *size);
+bool kernel_event_create(uint32_t *write_handle, uint32_t *read_handle);
+uint32_t kernel_event_copy(uint32_t read_handle);
+void dm_guest_write_prepare(void *address, size_t size);
+void dm_guest_write_prep_register(void (*hook)(void *, size_t));
+uint64_t kernel_thread_local(void);

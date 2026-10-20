@@ -6,6 +6,74 @@
     "host/kernel.c": {
       "sha256": "1b6c9ae12e6468ab347c8223497b69ec00290c01edea26f128afa3f3e5cbb379",
       "adapted_as": "runtime/kernel.c"
+    },
+    "host/services.c": {
+      "sha256": "0c7d08fe1af97a5655245ac58943c62a102157be7fc45f803dd6b2db17192d67",
+      "adapted_as": "runtime/services.c"
+    },
+    "host/services.h": {
+      "sha256": "9b3948c08f634d2668db1b00fd34ae38a0d4723cabbf04b63e38ab50a138e767",
+      "adapted_as": "runtime/services.h"
+    },
+    "host/filesystem.c": {
+      "sha256": "4370223804fec58b13c6a3b516bcd2efe091edd8ca7022f7db8ad3cd07e76b15",
+      "adapted_as": "runtime/filesystem.c"
+    },
+    "host/filesystem.h": {
+      "sha256": "a8698a9fc377dbb9c10a6d80c964c17a67bbc904905ca1dc196658d0f7fe0365",
+      "adapted_as": "runtime/filesystem.h"
+    },
+    "host/audio.c": {
+      "sha256": "ed5f46bfdb864ba823727d40fc6eef2103f232039c920bb2e7d45f8dc3c2630f",
+      "adapted_as": "runtime/audio.c"
+    },
+    "host/audio.h": {
+      "sha256": "bc256c091175d6aa26b1010a3773354f36e6c970578622bc7f67e57d59bc19ac",
+      "adapted_as": "runtime/audio.h"
+    },
+    "host/audio_mixer.c": {
+      "sha256": "501865643eb94ae83d1fc3d5f1cab60d0fe723e1b0e5d6c70a65097bbebb36b3",
+      "adapted_as": "runtime/audio_mixer.c"
+    },
+    "host/audio_mixer.h": {
+      "sha256": "342b9aed867e1568f476c52780f58aaad15542f44ccbe720760a8532460c2445",
+      "adapted_as": "runtime/audio_mixer.h"
+    },
+    "host/audio_voice.h": {
+      "sha256": "0c85c0094a74ac1bf4bfb09a7c441473d9f7d6dada382eebfb07bffb9c2132da",
+      "adapted_as": "runtime/audio_voice.h"
+    },
+    "host/audio_output.inc": {
+      "sha256": "c480f9256e2784fa55c66d9adbfb3cc560907f34ee1c3c915d4751aac2efb695",
+      "adapted_as": "runtime/audio_output.inc"
+    },
+    "host/audio_effects.inc": {
+      "sha256": "375acc97c5d98c366689660c606b45367afe0385fe14a688617968e540c96031",
+      "adapted_as": "runtime/audio_effects.inc"
+    },
+    "host/mach_memory.h": {
+      "sha256": "4fafe3795c87cbe8dcccc6aec214bbbae1913584817c58f3102488a8fd32cd7a",
+      "adapted_as": "runtime/mach_memory.h"
+    },
+    "tests/test_services.c": {
+      "sha256": "f047f2c59fb57bfc14da70e9781455edd7d8b0d5873717b41bf383b941959f6c",
+      "adapted_as": "tests/native_services.c"
+    },
+    "core/host/hle_thread.c": {
+      "sha256": "92f7b7b824156d3e467ee465a4cf8c4ee6527779a52fc90b02adacf342ebb782",
+      "adapted_as": "runtime/threads.c",
+      "license": "MIT",
+      "use": "Thread and synchronization algorithms adapted to Cpu dispatch, retained wait references and cooperative shutdown."
+    },
+    "core/gfx/nvn/nvn_protos.h": {
+      "sha256": "547b6c48d9424600bb16686767b9965427fff233de04b7eb4ffc74a9266cfa76",
+      "vendored_as": "third_party/zelda-mobile/core/gfx/nvn/nvn_protos.h",
+      "license": "MIT"
+    },
+    "core/gfx/nvn/include/nvn.h": {
+      "sha256": "4c2f96bd866dc914b43c7a2e3169d395473d91785946d76fa8ede6c56bca6091",
+      "vendored_as": "third_party/zelda-mobile/core/gfx/nvn/include/nvn.h",
+      "license": "MIT"
     }
   },
   "layout_reference": {

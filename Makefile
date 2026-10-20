@@ -24,4 +24,4 @@ load-only:
 
 startup:
 	@test -n "$(EXEFS)" || (echo 'Set EXEFS to your extracted v1.4.3 ExeFS directory'; exit 1)
-	$(PYTHON) tools/startup.py --exefs "$(EXEFS)" --through "$(THROUGH)"
+	$(PYTHON) tools/startup.py --exefs "$(EXEFS)" --through "$(THROUGH)" $(if $(ROMFS),--romfs "$(ROMFS)")

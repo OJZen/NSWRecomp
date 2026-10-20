@@ -31,11 +31,22 @@
 
 static uint64_t entropy[4];
 static const LoadedImage *modules;
+static _Atomic(void (*)(void *, size_t)) write_hook;
+void dm_guest_write_prep_register(void (*hook)(void *, size_t)) {
+    void (*old)(void *, size_t) = atomic_exchange(&write_hook, hook);
+    if (!hook || (old && old != hook)) abort();
+}
+void dm_guest_write_prepare(void *address, size_t size) {
+    void (*hook)(void *, size_t) = atomic_load(&write_hook);
+    if (hook && size) hook(address, size);
+}
 static uint8_t *space;
+static void *reservation;
 static pthread_mutex_t memory_lock = PTHREAD_MUTEX_INITIALIZER;
 static size_t used_memory;
 static uint64_t heap_size;
 static uint64_t main_stack_base, main_stack_size;
+static size_t tls_used;
 static uint8_t alias_pages[ALIAS_SIZE / PAGE];
 static struct stack_mapping { uint64_t source, destination, size; uint32_t source_state; } stacks[64];
 static struct { uint32_t handle; uint8_t *data; size_t size; } readonly_pages[16];
@@ -71,6 +82,7 @@ static struct memory_info query_memory(uint64_t address) {
     if (address >= limit) return (struct memory_info){.base = limit, .size = -limit, .state = 16};
     struct memory_info info = {.size = limit};
     if (space) region(&info, address, (uint64_t)space, 0x4000, 12, 3); // Process-local exception context.
+    if (space) region(&info, address, (uint64_t)space + 0x4000, tls_used, 12, 3);
     for (size_t i = 0; i < 16; i++) if (readonly_maps[i].handle)
         region(&info, address, readonly_maps[i].address, readonly_maps[i].size, 6, 1);
     for (size_t i = 0; i < 16; i++) if (transfers[i].handle) {
@@ -87,9 +99,10 @@ static struct memory_info query_memory(uint64_t address) {
     region(&info, address, (uint64_t)space + HEAP_OFFSET, heap_size, 5, 3);
     for (size_t i = 0; i < modules->count; i++) {
         const LoadHeader *h = &modules->modules[i].header;
-        region(&info, address, h->base + h->text_offset, h->text_size, 3, 5);
-        region(&info, address, h->base + h->ro_offset, h->ro_size, 3, 1);
-        region(&info, address, h->base + h->data_offset, h->data_size + h->bss_size, 4, 3);
+        // QueryMemory describes mapped guest pages, including a segment's zero-filled trailing bytes.
+        region(&info, address, h->base + h->text_offset, (h->text_size + PAGE - 1) & ~(PAGE - 1), 3, 5);
+        region(&info, address, h->base + h->ro_offset, (h->ro_size + PAGE - 1) & ~(PAGE - 1), 3, 1);
+        region(&info, address, h->base + h->data_offset, (h->data_size + h->bss_size + PAGE - 1) & ~(PAGE - 1), 4, 3);
     }
     // Mutex checks in the heap/modules must not scan the entire alias bitmap.
     for (size_t i = 0; !info.state && i < sizeof alias_pages;) {
@@ -127,16 +140,19 @@ int kernel_init(const LoadedImage *image, uint64_t stack_base, size_t stack_size
     // Keep alias, stack and heap disjoint; reservation consumes virtual addresses, not physical memory.
     // macOS can reserve large low-address holes; ask for a free range above them without replacing mappings.
     mach_vm_address_t address = 0x7000000000ull;
-    kern_return_t result = mach_vm_allocate(mach_task_self(), &address, RESERVE, VM_FLAGS_ANYWHERE);
+    const uint64_t alignment = 0x200000;
+    kern_return_t result = mach_vm_allocate(mach_task_self(), &address, RESERVE + alignment, VM_FLAGS_ANYWHERE);
     if (result != KERN_SUCCESS) return result == KERN_NO_SPACE ? LOAD_ADDRESS_UNAVAILABLE : LOAD_INVALID;
-    if (address > (1ull << 39) - RESERVE) {
-        mach_vm_deallocate(mach_task_self(), address, RESERVE);
+    uint64_t aligned = (address + alignment - 1) & ~(alignment - 1);
+    if (aligned > (1ull << 39) - RESERVE) {
+        mach_vm_deallocate(mach_task_self(), address, RESERVE + alignment);
         return LOAD_ADDRESS_UNAVAILABLE;
     }
-    space = (void *)(uintptr_t)address;
-    if (mprotect(space, RESERVE, PROT_NONE) || mprotect(space, 0x4000, PROT_READ | PROT_WRITE)) {
-        mach_vm_deallocate(mach_task_self(), address, RESERVE);
-        space = NULL;
+    reservation = (void *)(uintptr_t)address;
+    space = (void *)(uintptr_t)aligned;
+    if (mprotect(reservation, RESERVE + alignment, PROT_NONE) || mprotect(space, 0x4000, PROT_READ | PROT_WRITE)) {
+        mach_vm_deallocate(mach_task_self(), address, RESERVE + alignment);
+        reservation = space = NULL;
         return LOAD_INVALID;
     }
     main_stack_size = stack_size;
@@ -148,9 +164,10 @@ int kernel_init(const LoadedImage *image, uint64_t stack_base, size_t stack_size
 
 void kernel_destroy(void) {
     if (!threads_destroy()) return;
-    if (space) munmap(space, RESERVE);
-    space = NULL;
+    if (reservation) munmap(reservation, RESERVE + 0x200000);
+    reservation = space = NULL;
     heap_size = 0;
+    tls_used = 0;
     modules = NULL;
     nprotections = 0;
     memset(alias_pages, 0, sizeof alias_pages);
@@ -162,6 +179,22 @@ void kernel_destroy(void) {
 
 uint32_t kernel_readonly_page(const void *data) {
     return kernel_readonly_memory(data, PAGE);
+}
+
+uint64_t kernel_thread_local(void) {
+    pthread_mutex_lock(&memory_lock);
+    uint64_t address = 0;
+    // shortcut: TLS slots live until process teardown; add reuse before supporting long sessions with thread churn.
+    if (tls_used + 0x8000 <= ALIAS_OFFSET) {
+        unsigned char *page = space + 0x4000 + tls_used;
+        if (!mprotect(page, 0x4000, PROT_READ | PROT_WRITE)) {
+            memset(page, 0, 0x4000);
+            address = (uintptr_t)page;
+            tls_used += 0x4000;
+        }
+    }
+    pthread_mutex_unlock(&memory_lock);
+    return address;
 }
 bool kernel_transfer_memory(uint32_t handle, uint64_t *address, uint64_t *size) {
     bool found = false;

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,9 @@ static void first(Cpu *c) {
 }
 static void second(Cpu *c) {
     assert(LD64(c->sp - 8) == 123 && LD64(c->tpidr) == 456);
-    assert(c->x[0] == 0x8001 && c->x[1] == 0);
+    assert(c->x[0] && c->x[1] == 0);
+    c->x[1] = c->x[0]; rt_svc(c, 0x0c, 0x7200010080ull);
+    assert(!c->x[0] && c->x[1] == 44);
     rt_svc(c, 0x7f, 0x7200010080ull);
 }
 const uint64_t rtld_fn_addrs[] = {0x7200000080ull, 0x7200000090ull, 0x7200000094ull};
@@ -52,14 +55,32 @@ const uint64_t sdk_fn_count = 1;
 ''')
         subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
                         '-DTOTK_LINK_ALL', '-DTOTK_STARTUP', '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
-                        str(ROOT / 'runtime/probe.c'), str(ROOT / 'runtime/load.c'),
-                        str(ROOT / 'runtime/startup.c'), str(ROOT / 'runtime/kernel.c'),
-                        str(ROOT / 'runtime/threads.c'), str(source), '-o', str(cls.binary)], check=True, timeout=30)
+                        *[str(ROOT / 'runtime' / name) for name in startup.SOURCES if name.endswith('.c')],
+                        str(source), *startup.platform_flags(), '-o', str(cls.binary)], check=True, timeout=30)
         cls.kernel = cls.root / 'kernel'
+        empty_guest = cls.root / 'empty_guest.c'
+        empty_guest.write_text('#include "cpu.h"\n#include <stdlib.h>\n'
+                               'GuestFn rt_find_function(uint64_t a) { (void)a; return NULL; }\n'
+                               'void rt_dispatch(Cpu *c) { (void)c; abort(); }\n')
         subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
+                        '-I', str(ROOT / 'third_party/lasrecomp/runtime'), str(empty_guest),
                         '-I', str(ROOT / 'runtime'), str(ROOT / 'runtime/kernel.c'),
                         str(ROOT / 'runtime/threads.c'), str(ROOT / 'tests/native_kernel.c'),
                         '-o', str(cls.kernel)], check=True, timeout=30)
+        cls.services = cls.root / 'services'
+        subprocess.run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined',
+                        '-fno-omit-frame-pointer', '-Wall', '-Wextra', '-Werror',
+                        '-I', str(ROOT / 'third_party/lasrecomp/runtime'), str(empty_guest),
+                        *[str(ROOT / 'runtime' / name) for name in startup.SOURCES
+                          if name.endswith('.c') and name not in ('startup.c', 'probe.c', 'load.c')],
+                        str(ROOT / 'tests/native_services.c'), *startup.platform_flags(),
+                        '-o', str(cls.services)], check=True, timeout=30)
+        cls.threads = cls.root / 'threads'
+        subprocess.run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined',
+                        '-DTOTK_TEST_THREADS', '-Wall', '-Wextra', '-Werror',
+                        '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
+                        str(ROOT / 'runtime/kernel.c'), str(ROOT / 'runtime/threads.c'),
+                        str(ROOT / 'tests/native_threads.c'), '-o', str(cls.threads)], check=True, timeout=30)
 
     def test_state_persists_and_unknown_svc_stops(self):
         modules = [fixture(self.root / 'main'), fixture(self.root / 'sdk', main=False)]
@@ -78,15 +99,44 @@ const uint64_t sdk_fn_count = 1;
                 self.assertFalse(json.loads(result.stdout)['title_verified'])
             else:
                 self.assertIn('unsupported svc=7f stage=nnosInitialize', result.stderr)
+                self.assertEqual(json.loads(result.stdout)['completed_stages'], 1)
+                self.assertFalse(json.loads(result.stdout)['entered_nnMain'])
 
     def test_missing_startup_export_rejected(self):
         modules = [fixture(self.root / 'main'), fixture(self.root / 'sdk', main=False)]
         with self.assertRaisesRegex(ValueError, 'missing startup export'):
             startup.entries(modules)
 
+    def test_report_cannot_turn_an_incomplete_checkpoint_into_success(self):
+        partial = {'completed_stages': 1, 'title_verified': False, 'function_calls': 4,
+                   'constructors_completed': False, 'entered_nnMain': False, 'initialization_executed': True}
+        self.assertEqual(startup.native_report(json.dumps(partial), 78, 'nnosInitialize'), partial)
+        for value in ({}, [], partial, dict(partial, completed_stages=9), dict(partial, title_verified=True),
+                      dict(partial, completed_stages=2, entered_nnMain=True)):
+            with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
+                startup.native_report(json.dumps(value), 0, 'nnosInitialize')
+
     def test_native_memory_and_main_thread_contracts(self):
         for _ in range(8):
             result = subprocess.run([str(self.kernel)], capture_output=True, text=True, timeout=15)
+            if result.returncode != load.ADDRESS_UNAVAILABLE:
+                break
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_ipc_services_and_malformed_packets(self):
+        (self.root / 'work/tmp').mkdir(parents=True, exist_ok=True)
+        for _ in range(8):
+            result = subprocess.run([str(self.services)], cwd=self.root, capture_output=True, text=True, timeout=25,
+                                    env=dict(os.environ, DM_AUDIO='0', UBSAN_OPTIONS='halt_on_error=1',
+                                             ASAN_OPTIONS='detect_stack_use_after_return=0'))
+            if result.returncode != load.ADDRESS_UNAVAILABLE:
+                break
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_thread_context_waits_exit_and_stop(self):
+        for _ in range(8):
+            result = subprocess.run([str(self.threads)], capture_output=True, text=True, timeout=25,
+                                    env=dict(os.environ, UBSAN_OPTIONS='halt_on_error=1'))
             if result.returncode != load.ADDRESS_UNAVAILABLE:
                 break
         self.assertEqual(result.returncode, 0, result.stderr)

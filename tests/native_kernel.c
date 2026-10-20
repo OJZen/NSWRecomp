@@ -29,13 +29,17 @@ int main(void) {
     assert(memory != MAP_FAILED);
     LoadedImage image = {.count = 1, .bytes = 0x10000};
     image.modules[0].header = (LoadHeader){.base = (uintptr_t)memory, .size = 0x10000,
-        .text_size = 0x1000, .ro_offset = 0x4000, .ro_size = 0x1000,
+        .text_size = 0xf00, .ro_offset = 0x4000, .ro_size = 0x800,
         .data_offset = 0x8000, .data_size = 0x1000, .bss_size = 0x1000};
     uint32_t handle;
     int result = kernel_init(&image, (uintptr_t)memory + 0x10000, 0x10000, &handle);
     if (result) { munmap(memory, 0x20000); return result; }
     assert(query((uintptr_t)memory).permission == 5);
     assert(query((uintptr_t)memory + 0x4000).permission == 1);
+    assert(query((uintptr_t)memory + 0xfff).size == 0x1000);
+    assert(query((uintptr_t)memory + 0xfff).state == 3);
+    assert(query((uintptr_t)memory + 0x4fff).permission == 1);
+    assert(!query((uintptr_t)memory + 0x5000).state);
     assert(query((uintptr_t)memory + 0x9000).state == 4);
     assert(query((uintptr_t)memory + 0x10000).state == 11);
     assert(kernel_access((uintptr_t)memory + 0x8000, 0x2000, 3));
@@ -66,6 +70,7 @@ int main(void) {
     assert(kernel_svc(0x0e, r) && !r[0] && r[1] == UINT32_MAX && r[2] == 4);
     assert(kernel_svc(0x10, r) && r[0] == 2);
     uint64_t before = info(22), heap = info(4), alias = info(2), stack = info(14);
+    assert(!(info(12) % 0x200000) && !(heap % 0x200000) && !(alias % 0x200000) && !(stack % 0x200000));
     r[1] = 0x200000;
     assert(kernel_svc(1, r) && !r[0] && r[1] == heap);
     assert(info(22) == before + 0x200000 && query(heap).state == 5);
@@ -84,7 +89,9 @@ int main(void) {
     assert(!query(stack).state && !query(alias).attribute);
     r[0] = alias; r[1] = 0x10000;
     assert(kernel_svc(0x2d, r) && !r[0] && !query(alias).state);
-    assert(!kernel_svc(0x7f, r) && !kernel_svc(8, r));
+    assert(!kernel_svc(0x7f, r));
+    memset(r, 0, sizeof r);
+    assert(kernel_svc(8, r) && r[0] == 0xcc01);
     kernel_destroy();
     munmap(memory, 0x20000);
     return 0;

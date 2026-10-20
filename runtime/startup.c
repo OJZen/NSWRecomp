@@ -2,6 +2,8 @@
 #include "dispatch.h"
 #include "load.h"
 #include "kernel.h"
+#include "services.h"
+#include "threads.h"
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
@@ -10,18 +12,32 @@
 #include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 static const char *stages[] = {"_init_libc0", "nnosInitialize", "_init_libc1",
     "nninitInitializeSdkModule", "nninitStartup", "_init_libc2", "nnMain"};
-static const char *stage = "prepare";
-static uint64_t last_function, last_lr, calls;
+static _Atomic(const char *) stage = "prepare";
+static _Thread_local uint64_t last_function, last_lr;
+static atomic_uint_fast64_t calls;
+static atomic_uint completed_stages;
+static atomic_bool constructors_completed, entered_main;
 static Cpu cpu;
+
+static void report(void) {
+    printf("{\"completed_stages\":%u,\"last_stage\":\"%s\",\"function_calls\":%llu,"
+           "\"constructors_completed\":%s,\"entered_nnMain\":%s,"
+           "\"initialization_executed\":%s,\"title_verified\":false}\n",
+           atomic_load(&completed_stages), atomic_load(&stage), (unsigned long long)atomic_load(&calls),
+           atomic_load(&constructors_completed) ? "true" : "false", atomic_load(&entered_main) ? "true" : "false",
+           atomic_load(&calls) ? "true" : "false");
+}
 
 void fnprof_hit(uint64_t address, uint64_t lr, uint64_t x0) {
     (void)x0;
     last_function = address;
     last_lr = lr;
     calls++;
+    threads_checkpoint();
 }
 
 static void fault(int signal, siginfo_t *info, void *context) {
@@ -31,8 +47,43 @@ static void fault(int signal, siginfo_t *info, void *context) {
     _exit(128 + signal);
 }
 
+static void guest_trace(Cpu *c) {
+    uint64_t frame = c->x[29];
+    for (unsigned i = 0; i < 32 && frame && !(frame & 15) && kernel_access(frame, 16, 1); i++) {
+        uint64_t next = LD64(frame), lr = LD64(frame + 8);
+        fprintf(stderr, "STARTUP caller lr=%llx\n", (unsigned long long)lr);
+        if (next <= frame || next - frame > 0x100000) break;
+        frame = next;
+    }
+}
+
 void rt_svc(Cpu *c, uint32_t number, uint64_t pc) {
-    if (kernel_svc(number, c->x)) return;
+    threads_checkpoint();
+    if (kernel_svc(number, c->x)) { threads_checkpoint(); return; }
+    if (number == 0x16) { c->x[0] = service_close((uint32_t)c->x[0]) ? 0 : 0xe401; return; }
+    if (number == 0x1f) {
+        char name[12] = {0};
+        for (size_t i = 0; i < sizeof name; i++) {
+            if (c->x[1] > UINT64_MAX - i || !kernel_access(c->x[1] + i, 1, 1)) { c->x[0] = 0xe601; return; }
+            name[i] = (char)LD8(c->x[1] + i);
+            if (!name[i]) break;
+        }
+        if (!memchr(name, 0, sizeof name)) { c->x[0] = 0xe601; return; }
+        uint32_t handle;
+        if (service_connect(name, &handle)) { c->x[0] = 0; c->x[1] = handle; return; }
+        fprintf(stderr, "STARTUP service stopped: %s\n", service_blocker());
+    }
+    if (number == 0x21) {
+        uint32_t result;
+        if (service_request((uint32_t)c->x[0], (void *)(uintptr_t)c->tpidrro, 0x100, &result)) {
+            c->x[0] = result;
+            return;
+        }
+        fprintf(stderr, "STARTUP IPC stopped: %s\n", service_blocker());
+    }
+    if (number == 0x26 && c->x[2] == 4 && kernel_access(c->x[1], 4, 1))
+        fprintf(stderr, "STARTUP guest break result=%x\n", LD32(c->x[1]));
+    guest_trace(c);
     fprintf(stderr, "STARTUP unsupported svc=%x stage=%s pc=%llx x0=%llx x1=%llx x2=%llx x3=%llx\n",
             number, stage, (unsigned long long)pc, (unsigned long long)c->x[0],
             (unsigned long long)c->x[1], (unsigned long long)c->x[2], (unsigned long long)c->x[3]);
@@ -110,6 +161,7 @@ int main(int argc, char **argv) {
     uint32_t main_handle;
     result = kernel_init(&image, (uintptr_t)stack + page, stack_size, &main_handle);
     if (result) { munmap(stack, region_size); unload_image(&image); return result; }
+    if (atexit(report)) return LOAD_INVALID;
     g_fnprof = 1;
     for (unsigned i = 0; i < through; i++) {
         if (i == 6) {
@@ -123,17 +175,19 @@ int main(int argc, char **argv) {
                     if (function && function != UINT64_MAX) call(function);
                 }
             }
+            atomic_store(&constructors_completed, true);
         }
         stage = stages[i];
+        if (i == 6) atomic_store(&entered_main, true);
         fprintf(stderr, "STARTUP enter %s\n", stage);
         cpu.x[0] = i == 1 ? main_handle : 0;
         cpu.x[1] = 0;
         call(entries[i]);
+        atomic_store(&completed_stages, i + 1);
         fprintf(stderr, "STARTUP return %s\n", stage);
     }
-    printf("{\"completed_stages\":%llu,\"last_stage\":\"%s\",\"function_calls\":%llu,"
-           "\"initialization_executed\":true,\"title_verified\":false}\n",
-           (unsigned long long)through, stage, (unsigned long long)calls);
+    if (!threads_stop()) return 0; // Process exit reclaims a thread that did not reach a safe point.
+    service_shutdown();
     munmap(stack, region_size);
     kernel_destroy();
     unload_image(&image);
