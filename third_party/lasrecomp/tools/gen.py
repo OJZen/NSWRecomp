@@ -196,9 +196,15 @@ class Module:
         instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
         if len(instructions) * 4 != br_pc - start:
             return None
-        guards = [i for i, instruction in enumerate(instructions)
-                  if (self.word(instruction.address) & 0xFF000010) == 0x54000000 and
-                  bits(self.word(instruction.address), 0, 4) in (2, 3, 8, 9)]
+        block_start = max((i + 1 for i, instruction in enumerate(instructions)
+                           if self.lift(instruction.address).kind in ('b', 'bl', 'blr', 'br', 'ret', 'trap')), default=0)
+        block_address = instructions[block_start].address if block_start < len(instructions) else br_pc
+        guards = []
+        for i, instruction in enumerate(instructions):
+            word = self.word(instruction.address)
+            if (word & 0xFF000010) == 0x54000000 and bits(word, 0, 4) in (2, 3, 8, 9):
+                destination = instruction.address + sext(bits(word, 5, 19), 19) * 4
+                if i >= block_start or block_address <= destination <= br_pc: guards.append(i)
 
         def reg(register):
             name = self.table_disasm.reg_name(register)

@@ -21,7 +21,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -59,6 +59,13 @@ class StateTableTests(unittest.TestCase):
                                 *(['nop'] * (scheduled - len(extra))), 'br x2',
                                 'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret', 'mov w0, #99', 'ret']
                 entry, fmt, values = 0x80, '<4H', (0, 2, 4, 0xffff)
+            elif previous_guard:
+                instructions = ['b .+16', 'cmp w0, #2', 'b.hi .+52', 'ret',
+                                f'adr x1, .+{table - 0x90}', 'adr x2, .+16',
+                                'ldrb w3, [x1, x0]', 'add x2, x2, x3, lsl #2', 'br x2',
+                                'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret',
+                                'mov w0, #99', 'ret']
+                branch, entry, cases, fmt, values = 0xa0, 0x90, [0xa4, 0xac, 0xb4], '<4B', (0, 2, 4, 0xff)
             elif independent_guard:
                 instructions = ['cmp w4, #2', 'b.hi .+48', f'adr x1, .+{table - 0x88}', 'adr x2, .+16',
                                 'ldrb w3, [x1, x0]', 'add x2, x2, x3, lsl #2', 'br x2',
@@ -122,6 +129,9 @@ uint64_t rt_ticks(void) { abort(); }
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_previous_block_guard_does_not_hide_a_state_table(self):
+        self.check_table(1, previous_guard=True)
 
     def test_state_index_is_not_bounded_by_an_unrelated_guard(self):
         self.check_table(1, independent_guard=True)
