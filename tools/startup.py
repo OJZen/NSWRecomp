@@ -42,8 +42,10 @@ def bundle(executable):
     partial.unlink(missing_ok=True)
     os.link(executable, partial); partial.replace(NATIVE_APP)
     launch = NATIVE_APP.parent / 'launch'
-    launch.write_text('#!/bin/bash\nset -euo pipefail\ncd "$(dirname "$0")/../../../../.."\n'
-                      'exec work/venv/bin/python tools/run.py >work/logs/app-launch.log 2>&1\n')
+    launch.write_text('#!/bin/bash\nset -euo pipefail\n'
+                      'export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin"\n'
+                      'cd "$(dirname "$0")/../../../../.."\n'
+                      'exec ./script/build_and_run.sh --seconds 600 >work/logs/app-launch.log 2>&1\n')
     launch.chmod(0o755)
     with (APP / 'Contents/Info.plist').open('wb') as stream:
         plistlib.dump(dict(CFBundleIdentifier='local.totk-recomp', CFBundleName='TOTK Recompiled',
