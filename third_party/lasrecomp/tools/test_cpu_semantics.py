@@ -1,6 +1,7 @@
 """Synthetic native/Unicorn differential tests for bounded exclusive transactions and FP/SIMD."""
 import ctypes
 from pathlib import Path
+import platform
 import random
 import struct
 import subprocess
@@ -54,7 +55,8 @@ class CpuSemanticsTests(unittest.TestCase):
         source = cls.directory / 'cases.c'
         source.write_text('\n'.join(code))
         library = cls.directory / 'cases.so'
-        subprocess.run(['clang', '-O1', '-fno-strict-aliasing', '-shared', '-fPIC', '-pthread',
+        flags = ['-march=x86-64-v3'] if platform.machine().lower() in ('amd64', 'x86_64') else []
+        subprocess.run(['clang', *flags, '-O1', '-fno-strict-aliasing', '-shared', '-fPIC', '-pthread',
                         '-I', str(ROOT / 'runtime'), str(source), str(ROOT / 'tools/test_cpu_native.c'),
                         '-lm', '-o', str(library)], check=True, timeout=60, capture_output=True)
         cls.lib = ctypes.CDLL(str(library))

@@ -341,11 +341,13 @@ class Module:
                         if source is None: return None
                         mask = 0xffffffff if self.table_disasm.reg_name(args[0].reg).startswith('w') else 0xffffffffffffffff
                         values.update((v + (args[2].imm << args[2].shift.value)) & mask for v in source)
-                    elif instruction.id == C.ARM64_INS_MOV and len(args) == 2 and args[1].type == C.ARM64_OP_REG:
-                        source = address_values(reg(args[1].reg), at, seen | {key})
-                        if source is None: return None
+                    elif ((instruction.id == C.ARM64_INS_MOV and len(args) == 2) or
+                          (instruction.id == C.ARM64_INS_CSEL and len(args) == 3)) and all(a.type == C.ARM64_OP_REG for a in args):
                         mask = 0xffffffff if self.table_disasm.reg_name(args[0].reg).startswith('w') else 0xffffffffffffffff
-                        values.update(v & mask for v in source)
+                        for argument in args[1:]:
+                            source = address_values(reg(argument.reg), at, seen | {key})
+                            if source is None: return None
+                            values.update(v & mask for v in source)
                     else: return None
                     if len(values) > 64: return None
                 values_cache[key] = values
@@ -538,6 +540,22 @@ class Module:
             word = self.word(pc)
             if (word & 0x1F000000) == 0x10000000 or (word & 0xFF800000) == 0x91000000:
                 mu.emu_start(pc, 0, count=1)
+                continue
+            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[pc - self.base:pc - self.base + 4]), pc), None)
+            if instruction is None:
+                for register in range(31): mu.reg_write(self._gpr(register), SCRATCH_MEM + 0x80000)
+                mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+            elif instruction.group(capstone.CS_GRP_CALL):
+                # AAPCS64 preserves x19-x29 and SP across calls.
+                for register in (*range(19), 30): mu.reg_write(self._gpr(register), SCRATCH_MEM + 0x80000)
+            else:
+                # Skipping a write must not preserve an earlier address as a proven table base.
+                for register in self._register_access(instruction)[1]:
+                    name = self.table_disasm.reg_name(register)
+                    name = {'fp': 'x29', 'lr': 'x30', 'wsp': 'sp'}.get(name, name)
+                    if name == 'sp': mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+                    elif re.fullmatch('[xw][0-9]+', name or ''):
+                        mu.reg_write(self._gpr(int(name[1:])), SCRATCH_MEM + 0x80000)
         return mu
 
     def _set_index(self, mu, regs, i):

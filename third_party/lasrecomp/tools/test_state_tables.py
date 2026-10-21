@@ -21,7 +21,10 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False, dead_base=False, joined_base=False, indirect_entry=False, vector_write=False, branch_clobber=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False,
+                    independent_guard=False, previous_guard=False, long_guard=False, unguarded=False,
+                    subtract_mask=False, dead_base=False, joined_base=False, indirect_entry=False,
+                    vector_write=False, branch_clobber=False, selected_base=False, call_base=None):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -42,6 +45,10 @@ class StateTableTests(unittest.TestCase):
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
                 if vector_write: code[0xe8] = 'movi v2.2d, #0'
                 if branch_clobber: code[0xe8] = 'mov x2, x0'
+                if call_base is not None:
+                    code.update({0x60: 'mov x21, x30', 0x64: f'adr x{call_base}, .+{table - 0x64}',
+                                 0x68: 'bl .+80', 0x6c: 'mov x30, x21', 0x70: 'b .+100',
+                                 0xb8: 'mov x1, xzr', 0xbc: 'ret', 0xe0: f'ldrb w3, [x{call_base}, x0]'})
                 if dead_base: code.update({0x68: f'adr x1, .+{table - 0x68}', 0x6c: 'add x1, x1, #2'})
                 if unguarded: code.update({0xd4: 'nop', 0xd8: 'nop'})
                 if unmapped:
@@ -65,6 +72,10 @@ class StateTableTests(unittest.TestCase):
                                  0xa0: 'mov w0, #55', 0xa4: 'ret', 0xa8: 'mov w0, #66', 0xac: 'ret',
                                  0xb0: 'mov w0, #77', 0xb4: 'ret'})
                     cases += [0xa0, 0xa8, 0xb0]
+                    if selected_base:
+                        code.update({0x60: f'adr x1, .+{table - 0x60}', 0x64: f'adr x6, .+{table + 16 - 0x64}',
+                                     0x68: 'cmp x4, #0', 0x6c: 'csel x1, x1, x6, eq',
+                                     0x70: 'mov x1, x7' if clobber else 'nop'})
                 instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
             elif guarded:
                 extra = (['add w0, w0, #6'] if clobber else []) + (['and x6, x0, #0xffffffff'] if alias else [])
@@ -119,7 +130,7 @@ class StateTableTests(unittest.TestCase):
             buffer = (ctypes.c_ubyte * 8192)(); base = (ctypes.addressof(buffer) + 4095) & ~4095
             module = gen.Module('synthetic', path, base, 'c', game_patches=False)
             targets = module.jump_table(base + branch, base + entry, base + (0xf0 if distant else cases[-1]))
-            if not metadata or writable or clobber or branch_clobber:
+            if not metadata or writable or clobber or branch_clobber or (call_base is not None and call_base < 19):
                 self.assertIsNone(targets); return
             self.assertEqual(targets, [base + offset for offset in cases])
             output = directory / 'generated'
@@ -175,6 +186,37 @@ uint64_t rt_ticks(void) { abort(); }
     def test_table_base_join_preserves_both_predecessors(self):
         self.check_table(1, distant=True, joined_base=True)
         self.check_table(1, distant=True, unguarded=True, joined_base=True)
+
+    def test_conditional_select_preserves_both_table_bases(self):
+        self.check_table(1, distant=True, joined_base=True, selected_base=True)
+        self.check_table(1, distant=True, joined_base=True, selected_base=True, unguarded=True)
+
+    def test_calls_preserve_callee_saved_but_not_caller_saved_table_bases(self):
+        self.check_table(1, distant=True, call_base=24)
+        self.check_table(1, distant=True, call_base=1)
+
+    def test_unknown_write_invalidates_a_previous_table_base(self):
+        self.check_table(1, distant=True, joined_base=True, selected_base=True, clobber=True)
+        self.check_table(1, distant=True, joined_base=True, selected_base=True, clobber=True, unguarded=True)
+
+    def test_table_base_limit_does_not_accept_a_partial_set(self):
+        with tempfile.TemporaryDirectory(prefix='table-base-limit-') as temp:
+            directory = Path(temp)
+            instructions = ['adr x1, .+640']
+            for bit in range(7):
+                instructions += [f'tst w4, #{1 << bit}', f'add x6, x1, #{1 << bit}', 'csel x1, x1, x6, eq']
+            instructions += ['and w0, w0, #3', 'adr x2, .+16', 'ldrb w3, [x1, x0]',
+                             'add x2, x2, x3, lsl #2', 'br x2', 'mov w0, #11', 'ret', 'mov w0, #22', 'ret']
+            words = assemble(directory, instructions)
+            raw = fixture()
+            struct.pack_into('<ii', raw, 0x150, -0x40, -0x40)
+            struct.pack_into('<QQ', raw, 0x320, 0x80, len(words) * 4)
+            struct.pack_into('<' + 'I' * len(words), raw, 0x180, *words)
+            struct.pack_into('<3B', raw, 0x400, 0, 2, 0xff)
+            path = directory / 'synthetic.nso'; path.write_bytes(raw)
+            module = gen.Module('synthetic', path, 0x100000, 'c', game_patches=False)
+            branch = 0x100080 + (len(words) - 5) * 4
+            self.assertIsNone(module.jump_table(branch, 0x100080, branch + 20))
 
     def test_unreachable_address_writes_do_not_change_table_base(self):
         self.check_table(1, distant=True, dead_base=True)
