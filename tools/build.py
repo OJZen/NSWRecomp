@@ -3,11 +3,13 @@ import argparse
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 
 from bounded import run
 from recompile import ROOT, VENDOR, digest, generate, prepare_work, profile
@@ -61,6 +63,37 @@ def compile_unit(source, output, source_sha, context_sha, flags):
         partial.unlink(missing_ok=True)
 
 
+def reuse_renamed(name, source, directory, generation, context_sha):
+    candidates = {}
+    for receipt in directory.glob(f'{name}_*.json'):
+        if receipt.is_symlink() or not re.fullmatch(re.escape(name) + r'_(?:\d{3,}|table)\.json', receipt.name):
+            continue
+        try:
+            record = json.loads(receipt.read_text())
+            if record.get('context_sha256') == context_sha:
+                candidates.setdefault(record['source_sha256'], []).append(receipt.with_suffix('.o'))
+        except (ValueError, KeyError, OSError):
+            continue
+    # Stage hard links before replacing names: two chunks can exchange their positions.
+    with tempfile.TemporaryDirectory(prefix='reuse-objects-', dir=ROOT / 'work/tmp') as temp:
+        staged = []
+        for file, sha in generation['files'].items():
+            output = directory / Path(file).with_suffix('.o')
+            if ready(output, sha, context_sha): continue
+            for candidate in candidates.get(sha, ()):
+                if not ready(candidate, sha, context_sha): continue
+                if digest(source / file) != sha: raise ValueError('source changed during object reuse')
+                if output.is_symlink() or output.with_suffix('.json').is_symlink():
+                    raise ValueError('object reuse destination must not be a symlink')
+                pending = Path(temp) / output.name
+                os.link(candidate, pending)
+                staged.append((pending, output, json.loads(candidate.with_suffix('.json').read_text())))
+                break
+        for pending, output, record in staged:
+            pending.replace(output)
+            write_json(output.with_suffix('.json'), record)
+
+
 def batch(name, limit=128):
     current = json.loads((BUILD / 'context.json').read_text())
     if current != context():
@@ -72,10 +105,11 @@ def batch(name, limit=128):
     directory.mkdir(exist_ok=True)
     if directory.is_symlink():
         raise ValueError('object directory must not be a symlink')
+    if any(not re.fullmatch(re.escape(name) + r'_(?:\d{3,}|table)\.c', file) for file in generation['files']):
+        raise ValueError('unexpected generated filename')
+    reuse_renamed(name, source, directory, generation, context_sha)
     compiled = remaining = reused = 0
     for file, sha in generation['files'].items():
-        if not re.fullmatch(re.escape(name) + r'_(?:\d{3,}|table)\.c', file):
-            raise ValueError('unexpected generated filename')
         output = directory / Path(file).with_suffix('.o')
         if ready(output, sha, context_sha):
             reused += 1

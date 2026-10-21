@@ -21,7 +21,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False, dead_base=False, joined_base=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -40,6 +40,7 @@ class StateTableTests(unittest.TestCase):
                         0xe8: 'ldr x7, [x5]' if unrelated else 'nop',
                         0xec: 'br x2', 0xf0: 'mov w0, #99', 0xf4: 'ret'}
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
+                if dead_base: code.update({0x68: f'adr x1, .+{table - 0x68}', 0x6c: 'add x1, x1, #2'})
                 if unguarded: code.update({0xd4: 'nop', 0xd8: 'nop'})
                 if unmapped:
                     code.update({0x64: 'b .+104', 0xcc: 'cmp w0, #2', 0xd0: 'b.hi .+32',
@@ -55,6 +56,12 @@ class StateTableTests(unittest.TestCase):
                     if far_mask: code.update({0x64: 'and w6, w0, #3', 0x68: 'b .+108', 0xd0: 'nop'})
                     entry, cases, fmt, values = 0xd0, [0x80, 0x88, 0x90, 0x98], '<5B', (0, 2, 4, 6, 0xff)
                     if subtract_mask: code[0xd8] = 'sub w6, w6, #1'; cases = cases[:3]
+                if joined_base:
+                    code.update({0x60: 'cbnz x4, .+16', 0x64: f'adr x1, .+{table - 0x64}', 0x68: 'b .+108',
+                                 0x70: f'adr x1, .+{table + 16 - 0x70}', 0x74: 'b .+96',
+                                 0xa0: 'mov w0, #55', 0xa4: 'ret', 0xa8: 'mov w0, #66', 0xac: 'ret',
+                                 0xb0: 'mov w0, #77', 0xb4: 'ret'})
+                    cases += [0xa0, 0xa8, 0xb0]
                 instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
             elif guarded:
                 extra = (['add w0, w0, #6'] if clobber else []) + (['and x6, x0, #0xffffffff'] if alias else [])
@@ -104,6 +111,7 @@ class StateTableTests(unittest.TestCase):
             struct.pack_into('<' + 'I' * len(words), raw, 0x100 + function_entry, *words)
             for offset in (0x500, 0x508, 0x6f8, 0x700): struct.pack_into('<Q', raw, offset + 0x100, function_entry)
             struct.pack_into(fmt, raw, table + 0x100, *values)
+            if joined_base: struct.pack_into('<4B', raw, table + 0x110, 8, 10, 12, 0xff)
             path = directory / 'synthetic.nso'; path.write_bytes(raw)
             buffer = (ctypes.c_ubyte * 8192)(); base = (ctypes.addressof(buffer) + 4095) & ~4095
             module = gen.Module('synthetic', path, base, 'c', game_patches=False)
@@ -125,7 +133,7 @@ void rt_brk(Cpu *c, uint32_t i, uint64_t p) { (void)c; (void)i; (void)p; abort()
 void rt_udf(Cpu *c, uint64_t p) { (void)c; (void)p; abort(); }
 uint64_t rt_ticks(void) { abort(); }
 ''' + f'void f_{base + function_entry:x}(Cpu *c);\n'
-                + f'uint64_t run(uint64_t value) {{ Cpu cpu = {{0}}; uint64_t cell = 0, pointer = (uintptr_t)&cell; cpu.x[5] = (uintptr_t)&pointer; cpu.x[0] = value; f_{base + function_entry:x}(&cpu); return cpu.x[0]; }}\n')
+                + f'uint64_t run(uint64_t value) {{ Cpu cpu = {{0}}; uint64_t cell = 0, pointer = (uintptr_t)&cell; cpu.x[5] = (uintptr_t)&pointer; cpu.x[4] = value >> 32; cpu.x[0] = {'(uint32_t)value' if joined_base else 'value'}; f_{base + function_entry:x}(&cpu); return cpu.x[0]; }}\n')
             library = directory / 'synthetic.so'
             subprocess.run(['clang', '-shared', '-fPIC', '-O1', '-I', str(ROOT / 'runtime'),
                             *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
@@ -133,6 +141,9 @@ uint64_t rt_ticks(void) { abort(); }
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
             native = ctypes.CDLL(str(library)); native.run.argtypes = [ctypes.c_uint64]; native.run.restype = ctypes.c_uint64
             for value, expected in enumerate((11, 22, 33), int(subtract_mask)): self.assertEqual(native.run(value), expected)
+            if joined_base:
+                for value, expected in enumerate((55, 66, 77)): self.assertEqual(native.run((1 << 32) | value), expected)
+                if not unguarded: self.assertEqual(native.run((1 << 32) | 3), 99)
             if subtract_mask:
                 self.assertEqual(native.run(5), 11)
                 self.assertEqual(native.run(7), 33)
@@ -144,6 +155,15 @@ uint64_t rt_ticks(void) { abort(); }
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_table_base_join_preserves_both_predecessors(self):
+        self.check_table(1, distant=True, joined_base=True)
+        self.check_table(1, distant=True, unguarded=True, joined_base=True)
+
+    def test_unreachable_address_writes_do_not_change_table_base(self):
+        self.check_table(1, distant=True, dead_base=True)
+        self.check_table(1, distant=True, masked=True, dead_base=True)
+        self.check_table(1, distant=True, unguarded=True, dead_base=True)
 
     def test_masked_subtraction_limits_state_candidates(self):
         self.check_table(1, distant=True, masked=True, subtract_mask=True)

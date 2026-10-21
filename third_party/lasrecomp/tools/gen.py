@@ -119,6 +119,8 @@ class Module:
 
     def jump_table(self, br_pc, entry, end):
         """Resolve `br xN` targets from a bounds-checked jump table, or None."""
+        targets = self._state_table(br_pc, entry)
+        if targets is not None: return targets
         # Preserve a valid local context; earlier memory loads may not be emulatable.
         starts = [entry]
         earlier = max(self.lo, br_pc - 4 * 32)
@@ -138,7 +140,7 @@ class Module:
                     r = self._jump_table_taken(br_pc, bounds[0], end)
                 if r is not None:
                     return r
-        return self._state_table(br_pc, entry)
+        return None
 
     def _original_bounds(self, br_pc):
         if self.function_spans is None:
@@ -268,7 +270,7 @@ class Module:
             return None
         indexed = reg(memory.mem.index)
         mask_instructions = []
-        if br_pc - low <= 4 * 4096:
+        if br_pc - low <= 4 * 32768:
             mask_instructions = list(self.table_disasm.disasm(bytes(self.nso.image[low - self.base:br_pc - self.base]), low))
         mask_load_at = (load.address - low) // 4
         if len(mask_instructions) * 4 != br_pc - low: mask_instructions = []
@@ -279,8 +281,8 @@ class Module:
                     args[2].type == C.ARM64_OP_IMM and 0 < args[2].imm < 4096 and
                     not (args[2].imm & (args[2].imm + 1))):
                 masks[i] = args[2].imm + 1
-        state_indices = None
-        if masks:
+        state_indices, flow_tables, masked_count = None, None, None
+        if mask_instructions and (masks or constant(reg(memory.mem.base), load_at) is None):
             # A sibling case can end in BR between the mask and this table's direct predecessor.
             positions = {instruction.address: i for i, instruction in enumerate(mask_instructions)}
             predecessors = [set() for _ in mask_instructions]
@@ -300,7 +302,7 @@ class Module:
                 reachable.add(at)
                 pending.extend(successors[at] - reachable)
             for incoming in predecessors: incoming.intersection_update(reachable)
-            def reaching_definitions(before):
+            def reaching_definitions(before, register=indexed):
                 pending, seen, definitions = [before], set(), set()
                 if before not in reachable: return None
                 while pending:
@@ -311,10 +313,40 @@ class Module:
                     for previous in predecessors[at]:
                         instruction = mask_instructions[previous]
                         if instruction.group(capstone.CS_GRP_CALL): return None
-                        if indexed in (reg(r) for r in self._register_access(instruction)[1]): definitions.add(previous)
+                        if register in (reg(r) for r in self._register_access(instruction)[1]): definitions.add(previous)
                         else: pending.append(previous)
                 return definitions or None
 
+            values_cache = {}
+            def address_values(register, before, seen=frozenset()):
+                key = (register, before)
+                if key in values_cache: return values_cache[key]
+                if register is None or key in seen or len(seen) >= 64: return None
+                definitions = reaching_definitions(before, register)
+                if not definitions: return None
+                values = set()
+                for at in definitions:
+                    instruction = mask_instructions[at]
+                    args = instruction.operands
+                    if instruction.id in (C.ARM64_INS_ADR, C.ARM64_INS_ADRP):
+                        values.add(args[1].imm)
+                    elif (instruction.id == C.ARM64_INS_ADD and len(args) == 3 and
+                          args[2].type == C.ARM64_OP_IMM and args[2].shift.value in (0, 12)):
+                        source = address_values(reg(args[1].reg), at, seen | {key})
+                        if source is None: return None
+                        mask = 0xffffffff if self.table_disasm.reg_name(args[0].reg).startswith('w') else 0xffffffffffffffff
+                        values.update((v + (args[2].imm << args[2].shift.value)) & mask for v in source)
+                    elif instruction.id == C.ARM64_INS_MOV and len(args) == 2 and args[1].type == C.ARM64_OP_REG:
+                        source = address_values(reg(args[1].reg), at, seen | {key})
+                        if source is None: return None
+                        mask = 0xffffffff if self.table_disasm.reg_name(args[0].reg).startswith('w') else 0xffffffffffffffff
+                        values.update(v & mask for v in source)
+                    else: return None
+                    if len(values) > 64: return None
+                values_cache[key] = values
+                return values
+
+            flow_tables = address_values(reg(memory.mem.base), mask_load_at)
             definitions = reaching_definitions(mask_load_at)
             domain, complete = set(), bool(definitions)
             for at in definitions or ():
@@ -338,14 +370,12 @@ class Module:
             if complete: state_indices = domain
             counts = {masks[at] for at in definitions or () if at in masks}
             if definitions and definitions <= masks.keys() and len(counts) == 1:
-                targets = self._emulate_table(br_pc, low, high, load.address, indexed, counts.pop(),
-                                              load.address, readonly_table=(reg(memory.mem.base), width))
-                if targets is not None:
-                    self.stats['masked_tables'] += 1
-                    return targets
+                masked_count = counts.pop()
         table_register = reg(memory.mem.base)
         table = constant(table_register, load_at)
-        if table is None and table_register is not None and br_pc - low <= 4 * 4096:
+        if table is None and flow_tables and len(flow_tables) == 1:
+            table = next(iter(flow_tables))
+        if table is None and not flow_tables and table_register is not None and br_pc - low <= 4 * 4096:
             try:
                 mu = self._table_setup(low, load.address)
                 table = mu.reg_read(self._gpr(table_register))
@@ -353,21 +383,46 @@ class Module:
                 return None
         ro_start = self.base + self.nso.rodata[0]
         ro_end = ro_start + self.nso.rodata[1]
-        if table is not None and (not ro_start <= table < ro_end or table % width): return None
+        tables = {table} if table is not None else flow_tables or set()
+        if any(not ro_start <= t < ro_end or t % width for t in tables): return None
+
+        def bounded_targets(count):
+            if not tables: return None
+            targets = set()
+            for table in tables:
+                if table + count * width > ro_end: return None
+                for i in range(count):
+                    at = table + i * width - self.base
+                    offset = int.from_bytes(self.nso.image[at:at + width], 'little', signed=width == 4)
+                    target = case_base + (offset << operands[2].shift.value)
+                    if not self.in_text(target): return None
+                    targets.add(target)
+            return sorted(targets)
+
+        if masked_count:
+            targets = bounded_targets(masked_count) if tables else self._emulate_table(
+                br_pc, low, high, load.address, indexed, masked_count, load.address,
+                readonly_table=(table_register, width))
+            if targets is not None:
+                self.stats['masked_tables'] += 1
+                return targets
 
         def state_targets():
-            if table is None: return None
+            if not tables: return None
             targets = set()
-            for i in range(4096):
-                at = table + i * width
-                if at + width > ro_end: break
-                offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
-                target = case_base + (offset << operands[2].shift.value)
-                if not low <= target < high or not self.in_text(target): break
-                if state_indices is None or i in state_indices: targets.add(target)
-            else:
-                return None
-            if len(targets) < 2: return None
+            for table in tables:
+                candidates = set()
+                for i in range(4096):
+                    at = table + i * width
+                    if at + width > ro_end: break
+                    offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
+                    target = case_base + (offset << operands[2].shift.value)
+                    if not low <= target < high or not self.in_text(target): break
+                    if state_indices is None or i in state_indices: candidates.add(target)
+                else:
+                    return None
+                if len(candidates) < 2: return None
+                targets.update(candidates)
             self.stats['state_tables'] += 1
             return sorted(targets)
 
@@ -424,20 +479,14 @@ class Module:
                                                    for i in instructions[compare_at + 1:load_at]):
                     return state_targets()
                 return None
-            if table is None:
+            if not tables:
                 if br_pc - low > 4 * 4096: return None
                 return self._emulate_table(br_pc, low, high, load.address, reg(memory.mem.index), count,
                                            load.address, readonly_table=(reg(memory.mem.base), width))
-            if table + count * width > ro_end: return None
-            targets = set()
-            for i in range(count):
-                at = table + i * width - self.base
-                offset = int.from_bytes(self.nso.image[at:at + width], 'little', signed=width == 4)
-                target = case_base + (offset << operands[2].shift.value)
-                if not self.in_text(target): return None
-                targets.add(target)
+            targets = bounded_targets(count)
+            if targets is None: return None
             self.stats['static_guard_tables'] += 1
-            return sorted(targets)
+            return targets
         return state_targets()
 
     def _index_regs(self, start, at, idx):

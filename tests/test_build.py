@@ -21,6 +21,7 @@ class BuildTests(unittest.TestCase):
         self.source = self.root / 'work/generated/sample'
         self.output.mkdir(parents=True)
         self.source.mkdir(parents=True)
+        (self.root / 'work/tmp').mkdir()
         self.enterContext(patch.object(build, 'ROOT', self.root))
         self.enterContext(patch.object(build, 'BUILD', self.output))
         self.context = build.context()
@@ -45,6 +46,35 @@ class BuildTests(unittest.TestCase):
         obj.write_bytes(b'corrupt')
         self.assertFalse(build.ready(obj, self.generation['files']['sample_000.c'], build.signature(self.context)))
         self.assertEqual(build.batch('sample')['compiled'], 1)
+
+    def swap_chunks(self):
+        paths = [self.source / f'sample_{i:03}.c' for i in range(2)]
+        contents = [p.read_bytes() for p in paths]
+        for path, data in zip(paths, reversed(contents)): path.write_bytes(data)
+        self.generation['files'] = {p.name: digest(p) for p in paths}
+        build.write_json(self.source / 'receipt.json', self.generation)
+
+    def test_renumbered_chunks_reuse_objects_without_overwriting_their_sources(self):
+        build.batch('sample')
+        objects = [self.output / f'sample/sample_{i:03}.o' for i in range(2)]
+        inodes = [p.stat().st_ino for p in objects]
+        self.swap_chunks()
+        with patch.object(build, 'compile_unit', side_effect=AssertionError('unnecessary compile')):
+            result = build.batch('sample')
+        self.assertEqual((result['compiled'], result['reused'], result['remaining']), (0, 2, 0))
+        self.assertEqual([p.stat().st_ino for p in objects], list(reversed(inodes)))
+        self.assertEqual(len(build.object_list({'sample': self.generation}, self.context)), 2)
+        self.assertEqual(list((self.root / 'work/tmp').iterdir()), [])
+
+    def test_renumbered_chunks_reject_corrupt_objects_and_changed_context(self):
+        build.batch('sample')
+        (self.output / 'sample/sample_000.o').write_bytes(b'corrupt')
+        path = self.output / 'sample/sample_001.json'
+        record = json.loads(path.read_text()); record['context_sha256'] = 'old compiler'
+        build.write_json(path, record)
+        self.swap_chunks()
+        self.assertEqual(build.batch('sample')['compiled'], 2)
+        self.assertEqual(len(build.object_list({'sample': self.generation}, self.context)), 2)
 
     def test_failed_compile_preserves_old_object_and_receipt(self):
         build.batch('sample')
