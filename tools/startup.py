@@ -110,17 +110,16 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30):
     for attempt in range(1, 9):
         if PROCESS.parent.is_symlink() or PROCESS.is_symlink(): raise ValueError('process receipt must not be a symlink')
         PROCESS.parent.mkdir(exist_ok=True)
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment) as child:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True, env=environment) as child:
             try:
                 write_json(PROCESS, dict(pid=child.pid, executable=str(executable), identity=process_identity(child.pid)))
-                stdout, stderr = child.communicate(timeout=seconds + 5)
-                result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+                stdout, _ = child.communicate(timeout=seconds + 5)
+                result = subprocess.CompletedProcess(command, child.returncode, stdout)
             finally:
                 if child.poll() is None: child.kill(); child.wait()
                 if PROCESS.is_file() and json.loads(PROCESS.read_text()).get('pid') == child.pid: PROCESS.unlink()
         if result.returncode != ADDRESS_UNAVAILABLE:
             break
-    print(result.stderr, end='', flush=True)
     native = native_report(result.stdout, result.returncode, through)
     write_json(output, {'status': 'startup_checkpoint' if result.returncode == 0 else 'startup_stopped',
                        'exit_code': result.returncode, 'through': through, 'native': native,

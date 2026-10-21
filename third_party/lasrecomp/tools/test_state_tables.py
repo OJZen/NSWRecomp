@@ -21,12 +21,18 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
-            function_entry = 0x60 if distant else 0x80
-            if distant:
+            function_entry = 0x20 if long_guard else 0x60 if distant else 0x80
+            if long_guard:
+                instructions = ['cmp w0, #2', *(['nop'] * 23), 'b.hi .+88',
+                                'ldr x4, [x5]', 'ldr x4, [x4]', f'adr x1, .+{table - 0x8c}', 'adr x2, .+48',
+                                'ldrb w3, [x1, x0]', 'add x2, x2, x3, lsl #2', *(['nop'] * 8), 'br x2',
+                                'mov w0, #11', 'ret', 'mov w0, #22', 'ret', 'mov w0, #33', 'ret', 'mov w0, #99', 'ret']
+                branch, entry, cases, fmt, values = 0xbc, 0x20, [0xc0, 0xc8, 0xd0], '<4B', (0, 2, 4, 0xff)
+            elif distant:
                 code = {0x60: f'adr x1, .+{table - 0x60}', 0x64: 'b .+112',
                         0x80: 'mov w0, #11', 0x84: 'ret', 0x88: 'mov w0, #22', 0x8c: 'ret',
                         0x90: 'mov w0, #33', 0x94: 'ret', 0xd4: 'cmp w0, #2', 0xd8: 'b.hi .+24',
@@ -34,6 +40,7 @@ class StateTableTests(unittest.TestCase):
                         0xe8: 'ldr x7, [x5]' if unrelated else 'nop',
                         0xec: 'br x2', 0xf0: 'mov w0, #99', 0xf4: 'ret'}
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
+                if unguarded: code.update({0xd4: 'nop', 0xd8: 'nop'})
                 if unmapped:
                     code.update({0x64: 'b .+104', 0xcc: 'cmp w0, #2', 0xd0: 'b.hi .+32',
                                  0xd4: 'ldr x7, [x5]', 0xd8: 'ldr x7, [x7]'})
@@ -47,6 +54,7 @@ class StateTableTests(unittest.TestCase):
                     code[0x64] = 'b .+108'
                     if far_mask: code.update({0x64: 'and w6, w0, #3', 0x68: 'b .+108', 0xd0: 'nop'})
                     entry, cases, fmt, values = 0xd0, [0x80, 0x88, 0x90, 0x98], '<5B', (0, 2, 4, 6, 0xff)
+                    if subtract_mask: code[0xd8] = 'sub w6, w6, #1'; cases = cases[:3]
                 instructions = [code.get(at, 'nop') for at in range(0x60, 0xf8, 4)]
             elif guarded:
                 extra = (['add w0, w0, #6'] if clobber else []) + (['and x6, x0, #0xffffffff'] if alias else [])
@@ -87,6 +95,10 @@ class StateTableTests(unittest.TestCase):
             words = assemble(directory, instructions)
             raw = fixture()
             struct.pack_into('<ii', raw, 0x150, -0x40, -0x40)
+            if long_guard:
+                # Move MOD0 into unused readonly space so the long straight-line fixture fits in text.
+                struct.pack_into('<I', raw, 0x104, 0x470)
+                struct.pack_into('<4s6i', raw, 0x570, b'MOD0', -0x370, 0x490, 0x490, -0x470, -0x470, 0)
             struct.pack_into('<Q', raw, 0x320, function_entry)
             struct.pack_into('<Q', raw, 0x328, len(words) * 4 if metadata else 0)
             struct.pack_into('<' + 'I' * len(words), raw, 0x100 + function_entry, *words)
@@ -120,15 +132,28 @@ uint64_t rt_ticks(void) { abort(); }
                            check=True, timeout=30, capture_output=True)
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
             native = ctypes.CDLL(str(library)); native.run.argtypes = [ctypes.c_uint64]; native.run.restype = ctypes.c_uint64
-            for value, expected in enumerate((11, 22, 33)): self.assertEqual(native.run(value), expected)
-            if masked:
+            for value, expected in enumerate((11, 22, 33), int(subtract_mask)): self.assertEqual(native.run(value), expected)
+            if subtract_mask:
+                self.assertEqual(native.run(5), 11)
+                self.assertEqual(native.run(7), 33)
+            elif masked:
                 self.assertEqual(native.run(3), 44)
                 self.assertEqual(native.run(4), 11)
                 self.assertEqual(native.run(7), 44)
-            elif guarded or distant: self.assertEqual(native.run(3), 99)
+            elif (guarded or distant or long_guard) and not unguarded: self.assertEqual(native.run(3), 99)
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_masked_subtraction_limits_state_candidates(self):
+        self.check_table(1, distant=True, masked=True, subtract_mask=True)
+
+    def test_unguarded_table_base_before_control_flow(self):
+        self.check_table(1, distant=True, unguarded=True)
+        self.check_table(1, distant=True, unguarded=True, writable=True)
+
+    def test_scheduled_guard_preserves_distant_comparison_flags(self):
+        self.check_table(1, long_guard=True)
 
     def test_previous_block_guard_does_not_hide_a_state_table(self):
         self.check_table(1, previous_guard=True)

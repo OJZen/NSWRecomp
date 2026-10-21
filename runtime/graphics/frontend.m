@@ -100,7 +100,8 @@ int main(int argc, char **argv) {
         g_t0_ns = now_ns(); saved_argc = argc; saved_argv = argv;
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        TotkDelegate *delegate = [TotkDelegate new]; NSApp.delegate = delegate;
+        static TotkDelegate *delegate;
+        delegate = [TotkDelegate new]; NSApp.delegate = delegate;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1280, 720)
             styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
@@ -113,6 +114,9 @@ int main(int argc, char **argv) {
         [delegate windowDidResize:nil]; [window center]; [window makeKeyAndOrderFront:nil];
         [window makeFirstResponder:window.contentView];
         [NSApp activateIgnoringOtherApps:YES];
+        LOG("AppKit window=%ld visible=%d bundle=%s process_bundle=%s", (long)window.windowNumber, window.isVisible,
+            (NSBundle.mainBundle.bundleIdentifier ?: @"unknown").UTF8String,
+            (NSRunningApplication.currentApplication.bundleIdentifier ?: @"unregistered").UTF8String);
         NSMenu *menu = [NSMenu new]; NSMenuItem *item = [NSMenuItem new]; [menu addItem:item];
         NSMenu *app = [NSMenu new];
         [app addItemWithTitle:@"Quit TOTK Recompiled" action:@selector(terminate:) keyEquivalent:@"q"];

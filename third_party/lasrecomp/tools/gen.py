@@ -185,6 +185,17 @@ class Module:
         count = limit + (condition in (8, 9))
         return (index, count) if index < 31 and 0 < count <= 4096 else None
 
+    def _guard_comparison(self, guard, entry):
+        condition = bits(self.word(guard), 0, 4)
+        for pc in range(guard - 4, max(entry, guard - 4 * 32) - 1, -4):
+            comparison = self._table_compare(pc, condition)
+            if comparison is not None: return (pc, *comparison)
+            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[pc - self.base:pc - self.base + 4]), pc), None)
+            if (instruction is None or instruction.update_flags or
+                    self.lift(pc).kind in ('b', 'bl', 'blr', 'br', 'ret', 'trap')):
+                return None
+        return None
+
     def _state_table(self, br_pc, entry):
         """Resolve a readonly relative table from constants, guard or original function bounds."""
         if not self.computed_target(br_pc, entry):
@@ -192,7 +203,7 @@ class Module:
         bounds = self._original_bounds(br_pc)
         if bounds is None: return None
         low, high = bounds
-        start = max(low, br_pc - 4 * 32)
+        start = max(low, br_pc - 4 * 64)
         instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
         if len(instructions) * 4 != br_pc - start:
             return None
@@ -268,6 +279,7 @@ class Module:
                     args[2].type == C.ARM64_OP_IMM and 0 < args[2].imm < 4096 and
                     not (args[2].imm & (args[2].imm + 1))):
                 masks[i] = args[2].imm + 1
+        state_indices = None
         if masks:
             # A sibling case can end in BR between the mask and this table's direct predecessor.
             positions = {instruction.address: i for i, instruction in enumerate(mask_instructions)}
@@ -288,27 +300,57 @@ class Module:
                 reachable.add(at)
                 pending.extend(successors[at] - reachable)
             for incoming in predecessors: incoming.intersection_update(reachable)
-            pending, seen, counts = [mask_load_at], set(), set()
-            valid = mask_load_at in reachable
-            while pending and valid:
-                at = pending.pop()
-                if at in seen: continue
-                seen.add(at)
-                if not predecessors[at]: valid = False
-                for previous in predecessors[at]:
-                    instruction = mask_instructions[previous]
-                    if instruction.group(capstone.CS_GRP_CALL): valid = False
-                    elif indexed in (reg(r) for r in self._register_access(instruction)[1]):
-                        if previous not in masks: valid = False
-                        else: counts.add(masks[previous])
-                    else: pending.append(previous)
-            if valid and len(counts) == 1:
+            def reaching_definitions(before):
+                pending, seen, definitions = [before], set(), set()
+                if before not in reachable: return None
+                while pending:
+                    at = pending.pop()
+                    if at in seen: continue
+                    seen.add(at)
+                    if not predecessors[at]: return None
+                    for previous in predecessors[at]:
+                        instruction = mask_instructions[previous]
+                        if instruction.group(capstone.CS_GRP_CALL): return None
+                        if indexed in (reg(r) for r in self._register_access(instruction)[1]): definitions.add(previous)
+                        else: pending.append(previous)
+                return definitions or None
+
+            definitions = reaching_definitions(mask_load_at)
+            domain, complete = set(), bool(definitions)
+            for at in definitions or ():
+                if at in masks:
+                    domain.update(range(masks[at]))
+                    continue
+                instruction = mask_instructions[at]
+                args = instruction.operands
+                if (instruction.id in (C.ARM64_INS_ADD, C.ARM64_INS_SUB) and len(args) == 3 and
+                        args[1].type == C.ARM64_OP_REG and reg(args[1].reg) == indexed and args[2].type == C.ARM64_OP_IMM):
+                    sources = reaching_definitions(at)
+                    if sources and sources <= masks.keys():
+                        offset = args[2].imm << args[2].shift.value
+                        if instruction.id == C.ARM64_INS_SUB: offset = -offset
+                        bits_ = 32 if self.table_disasm.reg_name(args[0].reg).startswith('w') else 64
+                        domain.update((value + offset) & ((1 << bits_) - 1)
+                                      for source in sources for value in range(masks[source]))
+                        continue
+                complete = False
+                break
+            if complete: state_indices = domain
+            counts = {masks[at] for at in definitions or () if at in masks}
+            if definitions and definitions <= masks.keys() and len(counts) == 1:
                 targets = self._emulate_table(br_pc, low, high, load.address, indexed, counts.pop(),
                                               load.address, readonly_table=(reg(memory.mem.base), width))
                 if targets is not None:
                     self.stats['masked_tables'] += 1
                     return targets
-        table = constant(reg(memory.mem.base), load_at)
+        table_register = reg(memory.mem.base)
+        table = constant(table_register, load_at)
+        if table is None and table_register is not None and br_pc - low <= 4 * 4096:
+            try:
+                mu = self._table_setup(low, load.address)
+                table = mu.reg_read(self._gpr(table_register))
+            except uc.UcError:
+                return None
         ro_start = self.base + self.nso.rodata[0]
         ro_end = ro_start + self.nso.rodata[1]
         if table is not None and (not ro_start <= table < ro_end or table % width): return None
@@ -322,7 +364,7 @@ class Module:
                 offset = int.from_bytes(self.nso.image[at - self.base:at - self.base + width], 'little', signed=width == 4)
                 target = case_base + (offset << operands[2].shift.value)
                 if not low <= target < high or not self.in_text(target): break
-                targets.add(target)
+                if state_indices is None or i in state_indices: targets.add(target)
             else:
                 return None
             if len(targets) < 2: return None
@@ -339,37 +381,48 @@ class Module:
                     any(i.group(capstone.CS_GRP_JUMP) or i.group(capstone.CS_GRP_CALL) or i.group(capstone.CS_GRP_RET)
                         for i in instructions[guard_at + 1:])):
                 return None
-            compare_at = None
-            for i in range(guard_at - 1, max(-1, guard_at - 9), -1):
-                comparison = self._table_compare(instructions[i].address, condition)
-                if comparison is not None:
-                    compare_at = i
-                    break
-                if instructions[i].update_flags or instructions[i].group(capstone.CS_GRP_JUMP) or instructions[i].group(capstone.CS_GRP_CALL):
-                    return None
-            if compare_at is None: return None
-            compared, count = comparison
-            indexed, before = reg(memory.mem.index), load_at
+            comparison = self._guard_comparison(instructions[guard_at].address, start)
+            if comparison is None: return None
+            compare_pc, compared, count = comparison
+            compare_at = (compare_pc - start) // 4
+            indexed = reg(memory.mem.index)
             if indexed is None: return None
-            if indexed != compared and not any(indexed in (reg(r) for r in self._register_access(i)[1])
-                                               for i in instructions[compare_at + 1:load_at]):
-                # A guard of another value does not bound this untouched state index.
-                return state_targets()
             required_mask = (1 << (count - 1).bit_length()) - 1
-            while indexed != compared:
-                copy_at = writer(indexed, before)
-                if copy_at is None or copy_at <= compare_at: return None
-                copy = instructions[copy_at]
+
+            def copy_source(at):
+                copy = instructions[at]
                 args = copy.operands
-                if (copy.id == C.ARM64_INS_MOV and len(args) == 2 and args[1].type == C.ARM64_OP_REG):
-                    indexed = reg(args[1].reg)
-                elif (copy.id == C.ARM64_INS_AND and len(args) == 3 and args[2].type == C.ARM64_OP_IMM and
-                      args[2].imm & required_mask == required_mask):
-                    indexed = reg(args[1].reg)
-                else:
-                    return None
-                before = copy_at
-            if any(compared in (reg(r) for r in self._register_access(i)[1]) for i in instructions[compare_at + 1:before]):
+                if copy.id == C.ARM64_INS_MOV and len(args) == 2 and args[1].type == C.ARM64_OP_REG:
+                    return reg(args[1].reg)
+                if (copy.id == C.ARM64_INS_AND and len(args) == 3 and args[2].type == C.ARM64_OP_IMM and
+                        args[2].imm & required_mask == required_mask):
+                    return reg(args[1].reg)
+                return None
+
+            def saved_alias(register, seen):
+                if register == compared: return True
+                if register is None or register in seen: return False
+                at = writer(register, compare_at)
+                if at is None: return False
+                source = copy_source(at)
+                if source is None or any(source in (reg(r) for r in self._register_access(i)[1])
+                                         for i in instructions[at + 1:compare_at]): return False
+                return saved_alias(source, seen | {register})
+
+            before, value = load_at, indexed
+            resolved = False
+            while value is not None:
+                writes = [i for i in range(compare_at + 1, before)
+                          if value in (reg(r) for r in self._register_access(instructions[i])[1])]
+                if not writes:
+                    resolved = saved_alias(value, set())
+                    break
+                before = writes[-1]
+                value = copy_source(before)
+            if not resolved:
+                if indexed != compared and not any(indexed in (reg(r) for r in self._register_access(i)[1])
+                                                   for i in instructions[compare_at + 1:load_at]):
+                    return state_targets()
                 return None
             if table is None:
                 if br_pc - low > 4 * 4096: return None
@@ -414,9 +467,27 @@ class Module:
                         changed = True
         return sorted(regs)
 
+    @staticmethod
+    def _gpr(register):
+        if 0 <= register < 29: return A.UC_ARM64_REG_X0 + register
+        if register == 29: return A.UC_ARM64_REG_X29
+        if register == 30: return A.UC_ARM64_REG_X30
+        raise ValueError('invalid general register')
+
+    def _table_setup(self, entry, before):
+        mu = self.emu()
+        self.table_probe[:] = [False, False]
+        for register in range(31): mu.reg_write(self._gpr(register), SCRATCH_MEM + 0x80000)
+        mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
+        mu.reg_write(A.UC_ARM64_REG_NZCV, 0)
+        for pc in range(entry, before, 4):
+            word = self.word(pc)
+            if (word & 0x1F000000) == 0x10000000 or (word & 0xFF800000) == 0x91000000:
+                mu.emu_start(pc, 0, count=1)
+        return mu
+
     def _set_index(self, mu, regs, i):
-        for r in regs:
-            mu.reg_write(A.UC_ARM64_REG_X0 + r if r < 29 else A.UC_ARM64_REG_X29, i)
+        for r in regs: mu.reg_write(self._gpr(r), i)
 
     def _table_reads(self, br_pc, start):
         """Memory reads contributing to the branch target, excluding unrelated scheduled loads."""
@@ -439,6 +510,7 @@ class Module:
         """Run start..br for each index value (set at address set_at), collect targets."""
         mu = self.emu()
         rn = bits(self.word(br_pc), 5, 5)
+        if rn >= 31: return None
 
         def step_to(frm, to):
             pc = frm
@@ -454,31 +526,21 @@ class Module:
         targets = []
         try:
             for i in range(count):
-                self.table_probe[:] = [False, False]
-                for r in range(29):
-                    mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
-                mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
-                a2 = entry
-                while a2 < start:
-                    w2 = self.word(a2)
-                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
-                        mu.emu_start(a2, 0, count=1)
-                    a2 += 4
+                mu = self._table_setup(entry, start)
                 if set_at != start and not step_to(start, set_at):
                     return None
                 self._set_index(mu, [idx], i)
                 if readonly_table is not None:
                     register, width = readonly_table
-                    if register is None or register >= 29: return None
-                    table = mu.reg_read(A.UC_ARM64_REG_X0 + register)
+                    if register is None or register >= 31: return None
+                    table = mu.reg_read(self._gpr(register))
                     ro_start = self.base + self.nso.rodata[0]
                     if table % width or not ro_start <= table <= ro_start + self.nso.rodata[1] - count * width:
                         return None
                 self.table_probe[0] = table_reads
                 if not step_to(set_at, br_pc):
                     return None
-                t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
-                                (A.UC_ARM64_REG_X29 if rn == 29 else A.UC_ARM64_REG_X30))
+                t = mu.reg_read(self._gpr(rn))
                 if not self.in_text(t):
                     return None
                 targets.append(t)
@@ -501,14 +563,15 @@ class Module:
             t = g + sext(bits(w, 5, 19), 19) * 4
             if t != s:
                 continue
-            comparison = self._table_compare(g - 4, bits(w, 0, 4)) if g - 4 >= entry else None
+            comparison = self._guard_comparison(g, entry)
             if comparison is None: continue
-            index, count = comparison
+            _, index, count = comparison
             return self._emulate_table(br_pc, entry, end, s, index, count, s)
         return None
 
     def _jump_table_fallthrough(self, br_pc, entry, end):
         rn = bits(self.word(br_pc), 5, 5)
+        if rn >= 31: return None
         # find the guarding b.hi / b.hs and its cmp, scanning backwards
         a = br_pc - 4
         guard = cmp = None
@@ -522,19 +585,9 @@ class Module:
             a -= 4
         if guard is None:
             return None
-        a = guard - 4
-        while a >= entry and guard - a <= 4 * 8:
-            comparison = self._table_compare(a, bits(self.word(guard), 0, 4))
-            if comparison is not None:
-                cmp = a
-                break
-            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[a - self.base:a - self.base + 4]), a), None)
-            if self.lift(a).kind != 'op' or instruction is None or instruction.update_flags:
-                return None
-            a -= 4
-        if cmp is None:
-            return None
-        idx, count = comparison
+        comparison = self._guard_comparison(guard, entry)
+        if comparison is None: return None
+        cmp, idx, count = comparison
         # window start: back from cmp to the first control-flow instruction
         start = cmp
         while start - 4 >= entry and cmp - (start - 4) <= 4 * 12 and self.lift(start - 4).kind in ('op', 'asm'):
@@ -557,26 +610,14 @@ class Module:
 
         try:
             for i in range(count):
-                self.table_probe[:] = [False, False]
-                for r in range(29):
-                    mu.reg_write(A.UC_ARM64_REG_X0 + r, SCRATCH_MEM + 0x80000)
-                mu.reg_write(A.UC_ARM64_REG_SP, SCRATCH_MEM + 0x80000)
-                # replay address materialization (ADRP/ADR/ADD-imm) from the function entry, so table
-                # bases computed before loops or branches are known
-                a2 = entry
-                while a2 < start:
-                    w2 = self.word(a2)
-                    if (w2 & 0x1F000000) == 0x10000000 or (w2 & 0xFF800000) == 0x91000000:
-                        mu.emu_start(a2, 0, count=1)
-                    a2 += 4
+                mu = self._table_setup(entry, start)
                 if not step_to(start, cmp):
                     return None
                 self._set_index(mu, idx_regs, i)
                 self.table_probe[0] = table_reads
                 if not step_to(cmp, br_pc):
                     return None
-                t = mu.reg_read(A.UC_ARM64_REG_X0 + rn if rn < 29 else
-                                (A.UC_ARM64_REG_X29 if rn == 29 else A.UC_ARM64_REG_X30))
+                t = mu.reg_read(self._gpr(rn))
                 if not self.in_text(t):
                     return None
                 targets.append(t)
