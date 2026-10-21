@@ -69,14 +69,16 @@ def entries(modules):
     return addresses
 
 
-def native_report(stdout, returncode, through):
+def native_report(stdout, returncode, through, graphics=False):
     report = json.loads(stdout) if stdout.strip() else None
     if report is None and returncode:
         return None
     if (not isinstance(report, dict) or report.get('title_verified') is not False
             or type(report.get('completed_stages')) is not int
+            or type(report.get('window_closed', False)) is not bool
+            or (report.get('window_closed') and not graphics)
             or not 0 <= report['completed_stages'] <= STAGES.index(through) + 1
-            or (not returncode and report['completed_stages'] != STAGES.index(through) + 1)
+            or (not returncode and report['completed_stages'] != STAGES.index(through) + 1 and not report.get('window_closed'))
             or type(report.get('function_calls')) is not int or report['function_calls'] < 0
             or any(type(report.get(k)) is not bool for k in ('constructors_completed', 'entered_nnMain', 'initialization_executed'))
             or (report['constructors_completed'] and report['completed_stages'] < 6)
@@ -120,8 +122,9 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30):
                 if PROCESS.is_file() and json.loads(PROCESS.read_text()).get('pid') == child.pid: PROCESS.unlink()
         if result.returncode != ADDRESS_UNAVAILABLE:
             break
-    native = native_report(result.stdout, result.returncode, through)
-    write_json(output, {'status': 'startup_checkpoint' if result.returncode == 0 else 'startup_stopped',
+    native = native_report(result.stdout, result.returncode, through, graphics=executable == NATIVE_APP)
+    status = 'startup_stopped' if result.returncode else 'window_closed' if native.get('window_closed') else 'startup_checkpoint'
+    write_json(output, {'status': status,
                        'exit_code': result.returncode, 'through': through, 'native': native,
                        'address_space_attempts': attempt, 'title_verified': False,
                        'resource': resource,

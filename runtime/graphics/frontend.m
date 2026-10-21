@@ -15,6 +15,7 @@ static pthread_mutex_t vsync_lock = PTHREAD_MUTEX_INITIALIZER;
 static dispatch_source_t memory_watch;
 uint64_t g_t0_ns;
 int startup_run(int argc, char **argv);
+void startup_window_closed(void);
 
 void die(const char *format, ...) {
     va_list args; va_start(args, format); vfprintf(stderr, format, args); va_end(args);
@@ -67,6 +68,7 @@ ZeldaShaderStatus shader_status_snapshot(void) { return (ZeldaShaderStatus){.act
 @end
 @implementation TotkDelegate
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { (void)app; return YES; }
+- (void)applicationWillTerminate:(NSNotification *)notification { (void)notification; input_clear(); startup_window_closed(); }
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
     NSView *view = self.window.contentView;

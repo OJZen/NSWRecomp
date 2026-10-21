@@ -116,6 +116,20 @@ const uint64_t sdk_fn_count = 1;
             with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
                 startup.native_report(json.dumps(value), 0, 'nnosInitialize')
 
+    def test_window_close_is_distinct_from_a_completed_checkpoint(self):
+        report = {'completed_stages': 6, 'title_verified': False, 'function_calls': 4,
+                  'constructors_completed': True, 'entered_nnMain': True,
+                  'initialization_executed': True, 'window_closed': True}
+        self.assertEqual(startup.native_report(json.dumps(report), 0, 'nnMain', graphics=True), report)
+        with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
+            startup.native_report(json.dumps(report), 0, 'nnMain')
+        early = dict(report, completed_stages=0, constructors_completed=False, entered_nnMain=False,
+                     function_calls=0, initialization_executed=False)
+        self.assertEqual(startup.native_report(json.dumps(early), 0, 'nnMain', graphics=True), early)
+        for value in (False, 1):
+            with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
+                startup.native_report(json.dumps(dict(report, window_closed=value)), 0, 'nnMain', graphics=True)
+
     def test_native_memory_and_main_thread_contracts(self):
         for _ in range(8):
             result = subprocess.run([str(self.kernel)], capture_output=True, text=True, timeout=15)

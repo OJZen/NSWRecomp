@@ -22,15 +22,22 @@ static _Thread_local uint64_t last_function, last_lr;
 static atomic_uint_fast64_t calls;
 static atomic_uint completed_stages;
 static atomic_bool constructors_completed, entered_main;
+static atomic_bool window_closed, reported;
 static Cpu cpu;
 
 static void report(void) {
+    if (atomic_exchange(&reported, true)) return;
     printf("{\"completed_stages\":%u,\"last_stage\":\"%s\",\"function_calls\":%llu,"
            "\"constructors_completed\":%s,\"entered_nnMain\":%s,"
-           "\"initialization_executed\":%s,\"title_verified\":false}\n",
+           "\"initialization_executed\":%s,\"window_closed\":%s,\"title_verified\":false}\n",
            atomic_load(&completed_stages), atomic_load(&stage), (unsigned long long)atomic_load(&calls),
            atomic_load(&constructors_completed) ? "true" : "false", atomic_load(&entered_main) ? "true" : "false",
-           atomic_load(&calls) ? "true" : "false");
+           atomic_load(&calls) ? "true" : "false", atomic_load(&window_closed) ? "true" : "false");
+}
+
+void startup_window_closed(void) {
+    atomic_store(&window_closed, true);
+    report(); // Closing before image initialization must also produce a report.
 }
 
 void fnprof_hit(uint64_t address, uint64_t lr, uint64_t x0) {

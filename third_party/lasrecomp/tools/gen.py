@@ -274,14 +274,19 @@ class Module:
             mask_instructions = list(self.table_disasm.disasm(bytes(self.nso.image[low - self.base:br_pc - self.base]), low))
         mask_load_at = (load.address - low) // 4
         if len(mask_instructions) * 4 != br_pc - low: mask_instructions = []
-        masks = {}
-        for i, instruction in enumerate(mask_instructions[:mask_load_at]):
+        def mask_count(instruction):
             args = instruction.operands
             if (instruction.id == C.ARM64_INS_AND and len(args) == 3 and reg(args[0].reg) == indexed and
                     args[2].type == C.ARM64_OP_IMM and 0 < args[2].imm < 4096 and
                     not (args[2].imm & (args[2].imm + 1))):
-                masks[i] = args[2].imm + 1
-        state_indices, flow_tables, masked_count = None, None, None
+                return args[2].imm + 1
+            return None
+
+        masks = {i: count for i, instruction in enumerate(mask_instructions[:mask_load_at])
+                 if (count := mask_count(instruction)) is not None}
+        local_mask = writer(indexed, load_at)
+        masked_count = mask_count(instructions[local_mask]) if local_mask is not None else None
+        state_indices, flow_tables = None, None
         if mask_instructions and (masks or constant(reg(memory.mem.base), load_at) is None):
             # A sibling case can end in BR between the mask and this table's direct predecessor.
             positions = {instruction.address: i for i, instruction in enumerate(mask_instructions)}
@@ -686,7 +691,10 @@ class Module:
             w = self.word(a)
             if self.lift(a).kind not in ('op', 'asm'):
                 return False
-            if (w & 31) == rn:
+            instruction = next(self.table_disasm.disasm(bytes(self.nso.image[a - self.base:a - self.base + 4]), a), None)
+            if instruction is None: return False
+            names = (f'x{rn}', f'w{rn}', {29: 'fp', 30: 'lr'}.get(rn))
+            if any(self.table_disasm.reg_name(r) in names for r in self._register_access(instruction)[1]):
                 if (w & 0x1F000000) == 0x0B000000:  # ADD/SUB (shifted or extended register)
                     return True
                 if (w & 0x9F000000) == 0x10000000:  # ADR

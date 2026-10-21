@@ -21,7 +21,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 class StateTableTests(unittest.TestCase):
     def check_table(self, width, metadata=True, writable=False, guarded=False, clobber=False,
                     scheduled=12, alias=False, distant=False, unrelated=False, masked=False,
-                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False, dead_base=False, joined_base=False):
+                    alternate=False, far_mask=False, unmapped=False, compare_mask=False, independent_guard=False, previous_guard=False, long_guard=False, unguarded=False, subtract_mask=False, dead_base=False, joined_base=False, indirect_entry=False, vector_write=False, branch_clobber=False):
         with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
@@ -40,6 +40,8 @@ class StateTableTests(unittest.TestCase):
                         0xe8: 'ldr x7, [x5]' if unrelated else 'nop',
                         0xec: 'br x2', 0xf0: 'mov w0, #99', 0xf4: 'ret'}
                 branch, entry, cases, fmt, values = 0xec, 0xd4, [0x80, 0x88, 0x90], '<4B', (0, 2, 4, 0xff)
+                if vector_write: code[0xe8] = 'movi v2.2d, #0'
+                if branch_clobber: code[0xe8] = 'mov x2, x0'
                 if dead_base: code.update({0x68: f'adr x1, .+{table - 0x68}', 0x6c: 'add x1, x1, #2'})
                 if unguarded: code.update({0xd4: 'nop', 0xd8: 'nop'})
                 if unmapped:
@@ -53,6 +55,7 @@ class StateTableTests(unittest.TestCase):
                     if compare_mask: code.update({0xd4: 'cmp w6, #0', 0xd8: 'b.eq .-88'})
                     if alternate: code.update({0xd4: 'cbnz x5, .+8', 0xd8: 'br x7'})
                     code[0x64] = 'b .+108'
+                    if indirect_entry: code.update({0x64: 'adr x7, .+108', 0x68: 'br x7'})
                     if far_mask: code.update({0x64: 'and w6, w0, #3', 0x68: 'b .+108', 0xd0: 'nop'})
                     entry, cases, fmt, values = 0xd0, [0x80, 0x88, 0x90, 0x98], '<5B', (0, 2, 4, 6, 0xff)
                     if subtract_mask: code[0xd8] = 'sub w6, w6, #1'; cases = cases[:3]
@@ -116,7 +119,7 @@ class StateTableTests(unittest.TestCase):
             buffer = (ctypes.c_ubyte * 8192)(); base = (ctypes.addressof(buffer) + 4095) & ~4095
             module = gen.Module('synthetic', path, base, 'c', game_patches=False)
             targets = module.jump_table(base + branch, base + entry, base + (0xf0 if distant else cases[-1]))
-            if not metadata or writable or clobber:
+            if not metadata or writable or clobber or branch_clobber:
                 self.assertIsNone(targets); return
             self.assertEqual(targets, [base + offset for offset in cases])
             output = directory / 'generated'
@@ -127,7 +130,13 @@ class StateTableTests(unittest.TestCase):
 #include <stdlib.h>
 volatile int g_fnprof;
 void fnprof_hit(uint64_t a, uint64_t b, uint64_t d) { (void)a; (void)b; (void)d; }
-void rt_dispatch(Cpu *c) { (void)c; abort(); }
+extern const uint64_t synthetic_fn_addrs[], synthetic_fn_count;
+extern const GuestFn synthetic_fn_ptrs[];
+void rt_dispatch(Cpu *c) {
+    for (uint64_t i = 0; i < synthetic_fn_count; i++)
+        if (synthetic_fn_addrs[i] == c->pc) { synthetic_fn_ptrs[i](c); return; }
+    abort();
+}
 void rt_svc(Cpu *c, uint32_t i, uint64_t p) { (void)c; (void)i; (void)p; abort(); }
 void rt_brk(Cpu *c, uint32_t i, uint64_t p) { (void)c; (void)i; (void)p; abort(); }
 void rt_udf(Cpu *c, uint64_t p) { (void)c; (void)p; abort(); }
@@ -155,6 +164,13 @@ uint64_t rt_ticks(void) { abort(); }
 
     def test_table_base_before_partition_is_not_uninitialized_scratch(self):
         self.check_table(1, distant=True)
+
+    def test_vector_write_does_not_clobber_general_branch_register(self):
+        self.check_table(1, distant=True, unguarded=True, vector_write=True)
+        self.check_table(1, distant=True, unguarded=True, branch_clobber=True)
+
+    def test_local_mask_after_an_indirect_predecessor(self):
+        self.check_table(1, distant=True, masked=True, indirect_entry=True)
 
     def test_table_base_join_preserves_both_predecessors(self):
         self.check_table(1, distant=True, joined_base=True)
