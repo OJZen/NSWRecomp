@@ -4,6 +4,8 @@
 #include "host_compat.h"
 #include "shader_prep.h"
 #include "input.h"
+#include "gamepad.h"
+#include "control_panel.h"
 #include <stdatomic.h>
 #include <mach/mach.h>
 
@@ -43,12 +45,6 @@ uint32_t front_vsync_handle(void) {
     pthread_mutex_unlock(&vsync_lock);
     return handle;
 }
-void zelda_perf_render_size(unsigned width, unsigned height) {
-    static atomic_uint_fast64_t previous;
-    uint64_t size = (uint64_t)width << 32 | height;
-    if (atomic_exchange(&previous, size) != size) LOG("render size %u x %u", width, height);
-}
-
 // Optional precompiled IR is absent; Metal compiles the translated source with the same options.
 id<MTLLibrary> shader_ir_load(id<MTLDevice> device, NSString *path, const void *source, size_t length, bool layered) {
     (void)device; (void)path; (void)source; (void)length; (void)layered; return nil;
@@ -65,10 +61,14 @@ ZeldaShaderStatus shader_status_snapshot(void) { return (ZeldaShaderStatus){.act
 
 @interface TotkDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(strong) NSWindow *window;
+@property(strong) TotkControlPanel *panel;
 @end
 @implementation TotkDelegate
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { (void)app; return YES; }
-- (void)applicationWillTerminate:(NSNotification *)notification { (void)notification; input_clear(); startup_window_closed(); }
+- (void)applicationWillTerminate:(NSNotification *)notification { (void)notification; gamepad_stop(); startup_window_closed(); }
+- (void)applicationWillResignActive:(NSNotification *)notification { (void)notification; gamepad_active(false); }
+- (void)applicationDidBecomeActive:(NSNotification *)notification { (void)notification; gamepad_active(self.window.isKeyWindow); }
+- (void)windowWillClose:(NSNotification *)notification { (void)notification; [NSApp terminate:nil]; }
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
     NSView *view = self.window.contentView;
@@ -76,14 +76,15 @@ ZeldaShaderStatus shader_status_snapshot(void) { return (ZeldaShaderStatus){.act
     layer.drawableSize = [view convertSizeToBacking:view.bounds.size];
 }
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification { [self windowDidResize:notification]; }
-- (void)windowDidResignKey:(NSNotification *)notification { (void)notification; input_clear(); }
+- (void)windowDidResignKey:(NSNotification *)notification { (void)notification; gamepad_active(false); }
+- (void)windowDidBecomeKey:(NSNotification *)notification { (void)notification; gamepad_active(NSApp.isActive); }
 @end
 
 @interface TotkView : NSView
 @end
 @implementation TotkView
 - (BOOL)acceptsFirstResponder { return YES; }
-- (void)keyDown:(NSEvent *)event { input_key(event.keyCode, 1); }
+- (void)keyDown:(NSEvent *)event { if (!(event.modifierFlags & NSEventModifierFlagCommand)) input_key(event.keyCode, 1); }
 - (void)keyUp:(NSEvent *)event { input_key(event.keyCode, 0); }
 - (void)flagsChanged:(NSEvent *)event {
     if (event.keyCode == 56 || event.keyCode == 60) input_key(56, !!(event.modifierFlags & NSEventModifierFlagShift));
@@ -113,6 +114,12 @@ int main(int argc, char **argv) {
         if (!layer.device) die("Metal device unavailable");
         layer.pixelFormat = MTLPixelFormatBGRA8Unorm; layer.framebufferOnly = YES;
         window.contentView.wantsLayer = YES; window.contentView.layer = layer;
+        delegate.panel = [[TotkControlPanel alloc] initWithGameWindow:window layer:layer];
+        NSTitlebarAccessoryViewController *accessory = [NSTitlebarAccessoryViewController new];
+        NSButton *controls = [NSButton buttonWithTitle:@"控制面板" target:delegate.panel action:@selector(showPanel:)];
+        controls.frame = NSMakeRect(0, 0, 90, 26); controls.toolTip = @"性能、声音与手柄（⌘,）";
+        accessory.view = controls; accessory.layoutAttribute = NSLayoutAttributeRight;
+        [window addTitlebarAccessoryViewController:accessory];
         [delegate windowDidResize:nil]; [window center]; [window makeKeyAndOrderFront:nil];
         [window makeFirstResponder:window.contentView];
         [NSApp activateIgnoringOtherApps:YES];
@@ -121,8 +128,12 @@ int main(int argc, char **argv) {
             (NSRunningApplication.currentApplication.bundleIdentifier ?: @"unregistered").UTF8String);
         NSMenu *menu = [NSMenu new]; NSMenuItem *item = [NSMenuItem new]; [menu addItem:item];
         NSMenu *app = [NSMenu new];
+        NSMenuItem *panel_item = [app addItemWithTitle:@"控制面板…" action:@selector(showPanel:) keyEquivalent:@","];
+        panel_item.target = delegate.panel;
+        [app addItem:NSMenuItem.separatorItem];
         [app addItemWithTitle:@"Quit TOTK Recompiled" action:@selector(terminate:) keyEquivalent:@"q"];
         item.submenu = app; NSApp.mainMenu = menu;
+        gamepad_start(); gamepad_active(window.isKeyWindow && NSApp.isActive);
         memory_watch = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
         if (!memory_watch) die("Cannot create the native memory guard");

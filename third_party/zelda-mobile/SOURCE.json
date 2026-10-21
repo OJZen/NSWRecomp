@@ -2570,6 +2570,16 @@
       "adapted_as": "runtime/graphics/nvn/nvn_names.c",
       "use": "Public SDK API names only; no assembly code or native-entry thunks copied.",
       "license": "MIT"
+    },
+    "host/performance.c": {
+      "sha256": "26e464ebc0ef86542109116dff391fc4ded9cab22487a0b133092de1d875b504",
+      "adapted_as": "runtime/graphics/performance.c",
+      "license": "Apache-2.0"
+    },
+    "host/gamepad.m": {
+      "sha256": "7a7d664b5053540ddbda8278564cdd98fefd58818573664a9ed1739dabcdce0c",
+      "adapted_as": "runtime/graphics/gamepad.m",
+      "license": "Apache-2.0"
     }
   },
   "layout_reference": {

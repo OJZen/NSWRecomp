@@ -2,12 +2,15 @@
 #include "input.h"
 #include "dispatch.h"
 #include "host_compat.h"
+#include <math.h>
 
 typedef struct { uint64_t sampling, buttons; int32_t lx, ly, rx, ry; uint32_t attributes, reserved; } PadState;
 _Static_assert(sizeof(PadState) == 0x28, "Npad state ABI");
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned char keys[128];
 static uint64_t sampling, latched;
+static PadState controller;
+static uint64_t controller_latched;
 static uint32_t styles = 1, enabled = 1;
 static const struct { unsigned key, bit; } mapping[] = {
     {7,0}, {6,1}, {15,2}, {3,3}, {8,4}, {9,5}, {12,6}, {14,7},
@@ -22,7 +25,25 @@ void input_key(unsigned code, int pressed) {
     pthread_mutex_unlock(&lock);
 }
 void input_clear(void) {
-    pthread_mutex_lock(&lock); memset(keys, 0, sizeof keys); latched = 0; pthread_mutex_unlock(&lock);
+    pthread_mutex_lock(&lock);
+    memset(keys, 0, sizeof keys); latched = controller_latched = 0; controller = (PadState){0};
+    pthread_mutex_unlock(&lock);
+}
+static void stick(float x, float y, int32_t *out_x, int32_t *out_y) {
+    x = isfinite(x) ? fmaxf(-1, fminf(1, x)) : 0;
+    y = isfinite(y) ? fmaxf(-1, fminf(1, y)) : 0;
+    float length = hypotf(x, y);
+    float scale = length > .15f ? (fminf(length, 1) - .15f) / (.85f * length) : 0;
+    *out_x = lroundf(x * scale * 32767); *out_y = lroundf(y * scale * 32767);
+}
+void input_controller(uint64_t buttons, float lx, float ly, float rx, float ry) {
+    pthread_mutex_lock(&lock);
+    buttons &= 0xffff; controller_latched |= buttons & ~controller.buttons; controller.buttons = buttons;
+    stick(lx, ly, &controller.lx, &controller.ly); stick(rx, ry, &controller.rx, &controller.ry);
+    pthread_mutex_unlock(&lock);
+}
+void input_controller_clear(void) {
+    pthread_mutex_lock(&lock); controller = (PadState){0}; controller_latched = 0; pthread_mutex_unlock(&lock);
 }
 static void memory(uint64_t address, size_t size, unsigned permissions) {
     if (!kernel_access(address, size, permissions)) die("Invalid HID memory");
@@ -49,10 +70,12 @@ static void states(Cpu *c, unsigned style) {
     pthread_mutex_lock(&lock);
     PadState state = {.sampling = ++sampling};
     if (!id && enabled && (styles & style & 1)) {
-        state.buttons = latched; latched = 0;
+        state.buttons = latched | controller.buttons | controller_latched; latched = controller_latched = 0;
         for (size_t i = 0; i < sizeof mapping / sizeof *mapping; i++) if (keys[mapping[i].key]) state.buttons |= 1ull << mapping[i].bit;
         state.lx = (keys[2] - keys[0]) * 32767; state.ly = (keys[13] - keys[1]) * 32767;
         state.rx = (keys[37] - keys[38]) * 32767; state.ry = (keys[34] - keys[40]) * 32767;
+        if (!state.lx && !state.ly) { state.lx = controller.lx; state.ly = controller.ly; }
+        if (!state.rx && !state.ry) { state.rx = controller.rx; state.ry = controller.ry; }
         state.attributes = 3;
     }
     memcpy((void *)(uintptr_t)c->x[0], &state, sizeof state);
@@ -69,7 +92,7 @@ void hle__ZN2nn3hid14DisconnectNpadERKj(Cpu *c) {
     memory(c->x[0], 4, 1); uint32_t id = LD32(c->x[0]);
     pthread_mutex_lock(&lock); if (!id) enabled = 0; pthread_mutex_unlock(&lock);
 }
-// A keyboard exposes no motion sensor or vibration device.
+// Motion and vibration are not exposed by this input adapter.
 void hle__ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE(Cpu *c) { c->x[0] = 0; }
 void hle__ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE(Cpu *c) { c->x[0] = 0; }
 void hle__ZN2nn3hid15InitializeMouseEv(Cpu *c) { (void)c; }

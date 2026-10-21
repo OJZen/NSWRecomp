@@ -2,6 +2,7 @@
 #include "host_compat.h"
 #include "input.h"
 #include <assert.h>
+#include <math.h>
 #define HLE(name) void hle_##name(Cpu *);
 #include "hle_symbols.inc"
 #undef HLE
@@ -34,6 +35,17 @@ int main(int argc, char **argv) {
     input_key(2, 1); input_key(13, 1); sample(0);
     assert((int32_t)memory_words[2] == 32767 && (int32_t)(memory_words[2] >> 32) == 32767);
     input_clear(); sample(0); assert(!memory_words[1] && !memory_words[2]);
+    input_controller(1, .1f, -.1f, 1, -1); input_controller(0, .1f, -.1f, 1, -1);
+    sample(0); assert(memory_words[1] == 1 && !memory_words[2]);
+    int32_t *axes = (int32_t *)(memory_words + 2);
+    assert(axes[2] > 23000 && axes[2] < 23200 && axes[3] == -axes[2]);
+    sample(0); assert(!memory_words[1]);
+    input_controller(2, 1, 0, NAN, INFINITY); input_key(7, 1); input_key(13, 1);
+    sample(0); assert(memory_words[1] == 3 && axes[0] == 0 && axes[1] == 32767 && !memory_words[3]);
+    input_controller_clear(); sample(0); assert(memory_words[1] == 1 && axes[1] == 32767);
+    input_clear(); input_controller(0xffff, -2, 0, 0, 2); sample(0);
+    assert(memory_words[1] == 0xffff && axes[0] == -32767 && axes[3] == 32767);
+    input_clear(); sample(0); assert(!memory_words[1] && !memory_words[2] && !memory_words[3]);
     sample(2); assert(!memory_words[4]);
     c.x[0] = 2; hle__ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE(&c);
     sample(0); assert(!memory_words[4]);

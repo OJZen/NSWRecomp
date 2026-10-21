@@ -13,7 +13,7 @@ from build_shaders import chain
 
 GFX = ROOT / 'runtime/graphics'
 OUTPUT = ROOT / 'work/graphics'
-SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'frontend.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
+SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'frontend.m', 'performance.c', 'gamepad.m', 'control_panel.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
            'nvn/nvn_refl.m', 'nvn/nvn_tex.c', 'tex/nvn_fmt_mtl.c', 'tex/nvn_bcdec.c',
            'tex/nvn_deswizzle.c', 'tex/nvn_deswizzle_gpu.m', 'include/nvn_dirty.c',
            'include/timeline.c', 'include/trace_writer.c')
@@ -84,4 +84,4 @@ def build(exefs):
 
 def link_flags():
     return shlex.split('-framework Cocoa -framework QuartzCore -framework CoreVideo -framework Metal '
-                       '-framework MetalFX -framework ImageIO -framework UniformTypeIdentifiers')
+                       '-framework MetalFX -framework ImageIO -framework UniformTypeIdentifiers -framework GameController')

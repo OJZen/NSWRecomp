@@ -36,6 +36,12 @@ Its source, headers and library are not vendored. Apple AudioToolbox/CoreAudio
 are system frameworks. Synthetic audio tests run with speaker output disabled;
 they do not establish audible game playback.
 
+The frame statistics and GameController adapter in `runtime/graphics/performance.c`
+and `gamepad.m` adapt the same pinned Zelda-Mobile host sources under Apache-2.0.
+Their source digests are recorded in `third_party/zelda-mobile/SOURCE.json`.
+The native control panel, GPU interval union, input dead-zone handling and synthetic
+tests are local additions. GameController is an Apple system framework.
+
 The NVN API headers under `third_party/zelda-mobile/core/gfx/nvn/` are retained
 byte-for-byte from the same pinned source. `include/nvn.h` keeps its MIT notice,
 copyright 2020 h1k421; the generated prototype header is part of the d2r-mobile
