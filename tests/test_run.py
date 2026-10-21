@@ -20,7 +20,7 @@ class RunTests(unittest.TestCase):
     def test_finder_bundle_uses_shared_launcher_with_external_temporaries(self):
         with tempfile.TemporaryDirectory(prefix='finder launch ') as temp:
             root = Path(temp)
-            for directory in ('script', 'work/logs', 'work/venv/bin'):
+            for directory in ('script', 'work/logs', 'work/venv/bin', 'work/tmp'):
                 (root / directory).mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / 'script/build_and_run.sh', root / 'script/build_and_run.sh')
             python = root / 'work/venv/bin/python'
@@ -28,13 +28,18 @@ class RunTests(unittest.TestCase):
             python.chmod(0o755)
             executable = root / 'synthetic-native'; executable.write_bytes(b'no game data')
             app = root / 'work/app/TOTK Recompiled.app'
-            with patch.multiple(startup, ROOT=root, APP=app, NATIVE_APP=app / 'Contents/MacOS/totk-recomp'):
+            game = app / 'Contents/Helpers/TOTK Runtime.app'
+            with patch.multiple(startup, ROOT=root, APP=app, GAME_APP=game, NATIVE_APP=game / 'Contents/MacOS/totk-recomp'):
                 startup.bundle(executable)
             metadata = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
             launcher = app / 'Contents/MacOS' / metadata['CFBundleExecutable']
             self.assertTrue(os.access(launcher, os.X_OK))
+            self.assertNotEqual(launcher.read_bytes()[:2], b'#!')
+            self.assertIn('NSRemovableVolumesUsageDescription', metadata)
+            game_metadata = plistlib.loads((game / 'Contents/Info.plist').read_bytes())
+            self.assertEqual(game_metadata['CFBundleIdentifier'], metadata['CFBundleIdentifier'] + '.runtime')
             result = subprocess.run([str(launcher)], cwd='/', env={'PATH': '/usr/bin:/bin'},
-                                    capture_output=True, text=True, timeout=5)
+                                    capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             lines = (root / 'work/logs/app-launch.log').read_text().splitlines()
             self.assertEqual(lines[:2], [str(root), str(root / 'work/tmp') + '/'])

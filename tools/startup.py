@@ -22,8 +22,10 @@ SOURCES = (*RUNTIME, 'startup.c', 'kernel.c', 'kernel.h', 'threads.c', 'threads.
            'services.c', 'services.h', 'filesystem.c', 'filesystem.h', 'audio.c', 'audio.h',
            'audio_mixer.c', 'audio_mixer.h', 'audio_voice.h', 'audio_output.inc', 'audio_effects.inc', 'mach_memory.h')
 APP = ROOT / 'work/app/TOTK Recompiled.app'
-NATIVE_APP = APP / 'Contents/MacOS/totk-recomp'
+GAME_APP = APP / 'Contents/Helpers/TOTK Runtime.app'
+NATIVE_APP = GAME_APP / 'Contents/MacOS/totk-recomp'
 PROCESS = ROOT / 'work/session/guest.json'
+LAUNCHER_SOURCE = ROOT / 'runtime/macos_launcher.m'
 
 
 def process_identity(pid):
@@ -33,23 +35,35 @@ def process_identity(pid):
 
 
 def bundle(executable):
-    for directory in (ROOT / 'work/app', APP, APP / 'Contents', NATIVE_APP.parent):
+    for directory in (ROOT / 'work/app', APP, APP / 'Contents', APP / 'Contents/MacOS', APP / 'Contents/Helpers',
+                      GAME_APP, GAME_APP / 'Contents', NATIVE_APP.parent):
         if directory.is_symlink(): raise ValueError('app bundle must not be a symlink')
         directory.mkdir(exist_ok=True)
-    for path in (NATIVE_APP, NATIVE_APP.with_suffix('.partial'), NATIVE_APP.parent / 'launch', APP / 'Contents/Info.plist'):
+    launch = APP / 'Contents/MacOS/launch'
+    for path in (NATIVE_APP, NATIVE_APP.with_suffix('.partial'), launch,
+                 launch.with_suffix('.partial'), APP / 'Contents/Info.plist', GAME_APP / 'Contents/Info.plist'):
         if path.is_symlink(): raise ValueError('app bundle file must not be a symlink')
     partial = NATIVE_APP.with_suffix('.partial')
     partial.unlink(missing_ok=True)
     os.link(executable, partial); partial.replace(NATIVE_APP)
-    launch = NATIVE_APP.parent / 'launch'
-    launch.write_text('#!/bin/bash\nset -euo pipefail\n'
-                      'export PATH="${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}:/opt/homebrew/bin:/usr/local/bin"\n'
-                      'cd "$(dirname "$0")/../../../../.."\n'
-                      'exec ./script/build_and_run.sh --seconds 600 >work/logs/app-launch.log 2>&1\n')
-    launch.chmod(0o755)
+    candidate = launch.with_suffix('.partial')
+    try:
+        subprocess.run(['clang', '-fobjc-arc', '-O2', '-Wno-deprecated-declarations',
+                        str(LAUNCHER_SOURCE), '-framework', 'Cocoa', '-o', str(candidate)],
+                       check=True, capture_output=True, text=True, timeout=30,
+                       env=dict(os.environ, TMPDIR=str(ROOT / 'work/tmp')))
+        if launch.is_file() and digest(launch) == digest(candidate): candidate.unlink()
+        else: candidate.replace(launch)
+    finally:
+        candidate.unlink(missing_ok=True)
     with (APP / 'Contents/Info.plist').open('wb') as stream:
         plistlib.dump(dict(CFBundleIdentifier='local.totk-recomp', CFBundleName='TOTK Recompiled',
                           CFBundleExecutable='launch', CFBundlePackageType='APPL', CFBundleVersion='0.0.1',
+                          LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True, NSPrincipalClass='NSApplication',
+                          NSRemovableVolumesUsageDescription='读取你放在外置盘上的游戏数据、存档与本项目源码。'), stream)
+    with (GAME_APP / 'Contents/Info.plist').open('wb') as stream:
+        plistlib.dump(dict(CFBundleIdentifier='local.totk-recomp.runtime', CFBundleName='TOTK Recompiled',
+                          CFBundleExecutable='totk-recomp', CFBundlePackageType='APPL', CFBundleVersion='0.0.1',
                           LSMinimumSystemVersion='26.0', NSHighResolutionCapable=True, NSPrincipalClass='NSApplication'), stream)
 
 
@@ -183,6 +197,9 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30):
             result.update(link=link, execution=execution, executable_sha256=digest(directory / 'probe'),
                           runtime_sources={name: digest(ROOT / 'runtime' / name) for name in SOURCES},
                           planner_sha256=digest(Path(__file__)), graphics=graphics_result)
+            if graphics:
+                result['launcher'] = dict(source_sha256=digest(LAUNCHER_SOURCE),
+                                          executable_sha256=digest(APP / 'Contents/MacOS/launch'))
             write_json(directory / 'result.json', result)
     return result
 
