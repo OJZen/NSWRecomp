@@ -155,6 +155,14 @@ const uint64_t sdk_fn_count = 1;
                 break
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_external_stop_waits_for_main_guest_safe_point(self):
+        for _ in range(8):
+            result = subprocess.run([str(self.threads), 'external-stop'], capture_output=True, text=True, timeout=15,
+                                    env=dict(os.environ, UBSAN_OPTIONS='halt_on_error=1'))
+            if result.returncode != load.ADDRESS_UNAVAILABLE:
+                break
+        self.assertEqual(result.returncode, 0, result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

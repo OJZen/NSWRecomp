@@ -37,7 +37,12 @@ static void report(void) {
 
 void startup_window_closed(void) {
     atomic_store(&window_closed, true);
+    bool stopped = threads_stop();
     report(); // Closing before image initialization must also produce a report.
+    if (!stopped) {
+        fputs("STARTUP shutdown did not reach a safe point; skipping concurrent service teardown\n", stderr);
+        fflush(stdout); _Exit(78);
+    }
 }
 
 void fnprof_hit(uint64_t address, uint64_t lr, uint64_t x0) {
@@ -45,6 +50,8 @@ void fnprof_hit(uint64_t address, uint64_t lr, uint64_t x0) {
     last_function = address;
     last_lr = lr;
     calls++;
+    // Closing during image initialization can precede threads_init(), which resets its stop flag.
+    if (atomic_load(&window_closed)) threads_request_stop();
     threads_checkpoint();
 }
 

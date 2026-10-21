@@ -28,7 +28,7 @@ typedef struct Thread {
     uint64_t entry, identifier, mask, wait_address, key, order;
     uint32_t handle, tag, result;
     int priority, core, wait;
-    bool started, cancel, can_unwind;
+    bool started, cancel, can_unwind, main_thread, quiescent;
     struct Thread *next;
 } Thread;
 static struct { uint32_t id; Object *object; bool writable; } handles[4096];
@@ -42,6 +42,7 @@ static uint64_t next_identifier = 0x50, wait_order;
 static unsigned active;
 #ifdef TOTK_TEST_THREADS
 extern void (*threads_test_before_wait)(void);
+extern void (*threads_test_main_quiescent)(void);
 #define WAIT_READY() do { if (threads_test_before_wait) threads_test_before_wait(); } while (0)
 #else
 #define WAIT_READY() ((void)0)
@@ -177,6 +178,7 @@ uint32_t threads_init(void) {
     Thread *thread = new_thread();
     if (!thread) abort();
     thread->started = true; thread->priority = 44; thread->core = 0; thread->mask = 7;
+    thread->main_thread = true;
     thread->host = pthread_self();
     thread->object.refs++; // The running main thread outlives a closed public handle.
     current = thread;
@@ -185,7 +187,17 @@ uint32_t threads_init(void) {
 }
 
 void threads_checkpoint(void) {
-    if (current && current->can_unwind && atomic_load(&stopping)) longjmp(current->unwind, 1);
+    if (!current || !atomic_load(&stopping)) return;
+    if (current->can_unwind) longjmp(current->unwind, 1);
+    // Keep the main worker's image/TLS stack alive until process exit, without accessing services during teardown.
+    pthread_mutex_lock(&lock);
+    current->quiescent = true; pthread_cond_broadcast(&idle);
+#ifdef TOTK_TEST_THREADS
+    if (threads_test_main_quiescent) threads_test_main_quiescent();
+#endif
+    while (atomic_load(&stopping)) pthread_cond_wait(&current->changed, &lock);
+    current->quiescent = false;
+    pthread_mutex_unlock(&lock);
 }
 
 static void *thread_main(void *argument) {
@@ -210,13 +222,24 @@ static void *thread_main(void *argument) {
     return NULL;
 }
 
-bool threads_stop(void) {
-    pthread_mutex_lock(&lock);
+static void request_stop(void) {
     atomic_store(&stopping, true);
     for (Thread *t = all; t; t = t->next) pthread_cond_signal(&t->changed);
+}
+void threads_request_stop(void) {
+    pthread_mutex_lock(&lock); request_stop(); pthread_mutex_unlock(&lock);
+}
+static bool main_running_elsewhere(void) {
+    for (Thread *t = all; t; t = t->next)
+        if (t->main_thread && t != current && !t->quiescent) return true;
+    return false;
+}
+bool threads_stop(void) {
+    pthread_mutex_lock(&lock);
+    request_stop();
     uint64_t end = now() + 5000000000ull;
-    while (active) if (wait_until(&idle, 5000000000ll, end)) break;
-    bool stopped = !active;
+    while (active || main_running_elsewhere()) if (wait_until(&idle, 5000000000ll, end)) break;
+    bool stopped = !active && !main_running_elsewhere();
     pthread_mutex_unlock(&lock);
     return stopped;
 }

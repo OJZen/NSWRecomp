@@ -19,8 +19,17 @@ static Shared *shared;
 static uint64_t entry;
 static _Thread_local bool child;
 void (*threads_test_before_wait)(void);
+void (*threads_test_main_quiescent)(void);
+static atomic_bool main_parked;
+static void parked(void) { atomic_store(&main_parked, true); }
 
 static void ready(void) { if (child) atomic_store(&shared->ready, 1); }
+static void *external_stop(void *unused) {
+    (void)unused;
+    assert(threads_stop()); // Must wait for the guest main thread as well as child workers.
+    assert(atomic_load(&main_parked));
+    _Exit(0);
+}
 static void svc(unsigned number, uint64_t *r) {
     threads_checkpoint();
     assert(kernel_svc(number, r));
@@ -63,7 +72,8 @@ static uint64_t info(unsigned type) {
     uint64_t r[32] = {0, type, 0xffff8001u}; svc(0x29, r); assert(!r[0]); return r[1];
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    (void)argv;
     alarm(20);
     unsigned char *memory = mmap(NULL, 0x20000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(memory != MAP_FAILED);
@@ -73,6 +83,11 @@ int main(void) {
     uint32_t main_handle;
     int initialized = kernel_init(&image, (uintptr_t)memory + 0x10000, 0x10000, &main_handle);
     if (initialized) { munmap(memory, 0x20000); return initialized; }
+    if (argc > 1) {
+        threads_test_main_quiescent = parked;
+        pthread_t host; assert(!pthread_create(&host, NULL, external_stop, NULL));
+        for (;;) { threads_checkpoint(); sched_yield(); }
+    }
     shared = (void *)(memory + 0x8000); entry = (uintptr_t)memory + 0x80;
     threads_test_before_wait = ready;
     uint64_t alias = info(2), stack = info(14), r[32] = {alias, 0x10000};
