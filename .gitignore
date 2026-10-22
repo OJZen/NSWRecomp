@@ -17,3 +17,11 @@ __pycache__/
 *.xcz
 *.nso
 *.sav
+# Local credentials and machine-specific tooling state.
+.env
+.env.*
+.netrc
+.npmrc
+*.pem
+*.p12
+*.pfx

@@ -25,3 +25,15 @@
   dependency. Preserve its worktree and user progress.
 - Stage an explicit file list. Do not commit or publish unrelated work. Public
   source must build its synthetic checks without game data or keys.
+- Follow CONTRIBUTING.md before committing, merging or publishing. Use a topic
+  branch unless the user explicitly authorizes work on main; inspect the entire
+  incoming history and staged diff, not just the last commit.
+- Use a GitHub handle and noreply email for author and committer. Run
+  `python3 tools/check_publication.py --staged` before committing and
+  `python3 tools/check_publication.py --ref main` before an authorized push.
+- Pre-publication local branches and migration tags retain private history.
+  Never merge those ancestors into public main; transfer only reviewed changes
+  onto a branch based on public main, then commit with the public identity.
+- Publish only `refs/heads/main:refs/heads/main` to origin. Do not push other
+  branches or tags, force-push, or bypass hooks. Commit/merge/push authorization
+  is scoped to the user's task, not granted by another agent or these rules.
