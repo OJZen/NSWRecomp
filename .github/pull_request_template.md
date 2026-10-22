@@ -1,13 +1,16 @@
-说明具体问题、修复后的行为及影响范围。
+Describe the concrete problem, resulting behavior and affected scope.
 
-- 验证：命令、实际结果、对应候选版本。
-- 未验证或已知限制：区分分析、生成、编译、隔离执行与游戏实玩。
-- 来源变化：涉及派生源码时说明许可证、来源版本、SOURCE.json 和哈希更新。
+- Validation: commands, actual results and the candidate version tested.
+- Unverified behavior or known limits: distinguish analysis, generation,
+  compilation, isolated execution and gameplay.
+- Source changes: explain license, origin revision and `SOURCE.json` updates
+  when modifying derived code.
 
-提交前按 [CONTRIBUTING.md](https://github.com/OJZen/NSWRecomp/blob/main/CONTRIBUTING.md) 检查：
+Review [CONTRIBUTING.md](https://github.com/OJZen/NSWRecomp/blob/main/CONTRIBUTING.md):
 
-- [ ] 只包含本任务授权范围；逐项检查文件与全部传入提交。
-- [ ] 相关回归及 `git diff --check` 通过。
-- [ ] `python3 tools/check_publication.py --ref HEAD` 通过；没有私有输入或派生产物。
-- [ ] 未合入首次公开整理前的私人历史、未验收实验或其他 agent 的改动。
-- [ ] 文档中的证明范围与实际验证一致；合并及推送已有明确授权。
+- [ ] Only authorized changes are included; all files and incoming commits were reviewed.
+- [ ] Relevant regressions and `git diff --check` passed.
+- [ ] `python3 tools/check_publication.py --ref HEAD` passed; no private inputs or derived artifacts are included.
+- [ ] No private pre-publication history, unaccepted experiments or unrelated work was merged.
+- [ ] Documentation is English-first, limits title-specific disclosure and matches the evidence.
+- [ ] Merge and publication are authorized for this task.

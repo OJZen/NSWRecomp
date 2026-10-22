@@ -6,6 +6,10 @@
 
 - Read README.md and docs/status.md before changing the pipeline. Keep proof of
   analysis, C generation, compilation, isolated execution and game play distinct.
+- Public documentation is English-first. Focus on architecture, interfaces,
+  synthetic checks and essential adapter/input requirements. Keep detailed
+  gameplay, story, save-origin and per-run game reports in ignored local records;
+  publishing those details requires explicit owner approval.
 - Keep user packages, keys, extracted files, generated C, shaders, saves and
   binaries under ignored local/ or work/. Never commit game-derived fixtures.
   Synthetic instruction fixtures are allowed. Never print key contents.
