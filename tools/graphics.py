@@ -7,13 +7,14 @@ import subprocess
 
 from bounded import run
 from build import signature, write_json
+from load import Module, symbol_scope
 from nvn_bridge import HEADERS, generate
 from recompile import ROOT, VENDOR, Nso, digest, verify
 from build_shaders import chain
 
 GFX = ROOT / 'runtime/graphics'
 OUTPUT = ROOT / 'work/graphics'
-SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'frontend.m', 'performance.c', 'gamepad.m', 'control_panel.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
+SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'movie.c', 'movie_video.c', 'frontend.m', 'shader_prep.m', 'render_prep.m', 'performance.c', 'gamepad.m', 'control_panel.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
            'nvn/nvn_refl.m', 'nvn/nvn_tex.c', 'tex/nvn_fmt_mtl.c', 'tex/nvn_bcdec.c',
            'tex/nvn_deswizzle.c', 'tex/nvn_deswizzle_gpu.m', 'include/nvn_dirty.c',
            'include/timeline.c', 'include/trace_writer.c')
@@ -31,17 +32,19 @@ def build(exefs):
         if p.is_symlink(): raise ValueError('graphics output must not be a symlink')
         p.mkdir(exist_ok=True)
     hashes = source_hashes()
-    info = verify(exefs)['sdk']
-    sdk = Nso(exefs / 'sdk')
-    exports = {name: int(info['base'], 0) + value for name, kind, section, value, size in sdk.syms
-               if section and kind & 15 == 2}
+    infos = verify(exefs)
+    modules = [Module(name, int(info['base'], 0), Nso(exefs / name)) for name, info in infos.items()]
+    # Match guest relocation lookup, including game allocator overrides of SDK defaults.
+    exports = {name.decode(): owner.defined_value(symbol)
+               for name, (owner, symbol) in symbol_scope(modules).items()
+               if symbol[2] == 2 and owner.nso.text[0] <= symbol[5] < sum(owner.nso.text)}
     symbols = re.findall(r'^GUEST\((\w+)\)$', (GFX / 'guest_symbols.inc').read_text(), re.M)
     if not symbols or len(set(symbols)) != len(symbols) or any(name not in exports for name in symbols):
         raise ValueError('missing or duplicate SDK callback helper')
     sdk_source = OUTPUT / 'guest_symbols.c'
     sdk_source.write_text('#include <stdint.h>\n#include <string.h>\nuint64_t graphics_guest_export(const char *name) {\n' +
         ''.join(f'    if (!strcmp(name, "{name}")) return {exports[name]:#x}ull;\n' for name in symbols) + '    return 0;\n}\n')
-    del sdk
+    del modules
     identity = signature(hashes)
     for name, macro in (('dmsh_chain.h', 'DMSH_CHAIN'), ('pipeline_recipe_identity.h', 'ZELDA_PIPELINE_RECIPE_CONTRACT')):
         value = chain() if name == 'dmsh_chain.h' else identity
@@ -53,7 +56,8 @@ def build(exefs):
                                    (HEADERS / 'include/nvn.h').read_text() + extra, names, 'nvn_extra_protos.h')
     generated = OUTPUT / 'nvn_bridge.c'
     generated.write_text(bridge)
-    flags = ['-std=gnu11', '-O2', '-g0', '-fno-strict-aliasing', '-fobjc-arc', '-Wno-deprecated-declarations']
+    flags = ['-std=gnu11', '-O2', '-flto=thin', '-g0', '-fno-strict-aliasing', '-fobjc-arc', '-Wno-deprecated-declarations']
+    flags += shlex.split(subprocess.check_output(['pkg-config', '--cflags', 'vpx'], text=True, timeout=10))
     includes = [ROOT / 'runtime', VENDOR / 'runtime', GFX, GFX / 'include', GFX / 'nvn',
                 HEADERS, HEADERS / 'include', OUTPUT / 'include', ROOT / 'third_party/zelda-mobile/core/third_party/bcdec']
     for path in includes: flags += ['-I', str(path)]
@@ -83,5 +87,6 @@ def build(exefs):
 
 
 def link_flags():
-    return shlex.split('-framework Cocoa -framework QuartzCore -framework CoreVideo -framework Metal '
-                       '-framework MetalFX -framework ImageIO -framework UniformTypeIdentifiers -framework GameController')
+    return shlex.split('-flto=thin -framework Cocoa -framework QuartzCore -framework CoreVideo -framework Metal '
+                       '-framework MetalFX -framework ImageIO -framework UniformTypeIdentifiers -framework GameController') + shlex.split(
+                           subprocess.check_output(['pkg-config', '--libs', 'vpx'], text=True, timeout=10))

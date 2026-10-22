@@ -6,7 +6,8 @@
   binaries under ignored local/ or work/. Never commit game-derived fixtures.
   Synthetic instruction fixtures are allowed. Never print key contents.
 - Put temporary files and caches on the external volume under work/tmp/. Bound
-  long jobs; default to one compiler process. Remove obsolete task-owned output
+  long jobs; default to at most eight compiler processes with a 4 GiB aggregate
+  RSS guard (user authorized multicore builds on 2026-10-21). Remove obsolete task-owned output
   after checking it is not in use. Never clean the reference projects or saves.
 - LASRecomp is the source of the recompiler subset in third_party/lasrecomp.
   Fix generic defects upstream on its dedicated branch, test with synthetic

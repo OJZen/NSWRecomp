@@ -96,7 +96,7 @@ static id<MTL4CommandQueue> g_q4;
 static dispatch_queue_t g_feedback_q;
 #endif
 static _Atomic uint32_t g_present_qos;
-#define ALLOC_MAX 8
+#define ALLOC_MAX 16
 static int g_alloc_n, g_alloc_cur;   // 主提交的在途槽（Metal 4：每槽一个命令分配器；老接口：只用来限制在途提交数） | in-flight slots of the main submission (Metal 4: one command allocator per slot; older API: used only to limit the number of in-flight submissions)
 #if !DM_NVN_M3
 static id<MTL4CommandAllocator> g_alloc4[ALLOC_MAX];   // 主提交的命令分配器池：开工时挑一个 GPU 已用完的，没有就新建（到上限才等） | Command allocator pool of the main submission: at start pick one the GPU has finished with, create a new one if there is none (wait only at the cap)
@@ -894,7 +894,8 @@ uint64_t mtl_sub_commit(void) {
     CBUF buffers[] = {g_cb};
     [g_q4 commit:buffers count:1 options:o];
     zelda_timeline(TL_COMMIT, z_timeline, fence, gpu_f);
-    [g_q4 signalEvent:g_ev value:fence];
+    // Partial slices retire through feedback; keep the full guest-submit completion event.
+    if (!z_slice_vis.keep) [g_q4 signalEvent:g_ev value:fence];
 #endif
     cb_committed();
     g_alloc_fence[g_alloc_cur] = fence;
@@ -2263,6 +2264,12 @@ static NvShader *shader_get(NSString *pc, int stage) {
 }
 
 #include "nvn_compile_shaders.inc"
+#include "nvn_program_prepare.inc"
+static id<MTLComputePipelineState> compute_from_shader(NvShader *shader, NSError **error) {
+    NSString *path = [g_msl_dir stringByAppendingPathComponent:[@(shader->key) stringByAppendingString:@".metallib"]];
+    id<MTLComputePipelineState> pipeline = shader_compute_load(g_dev, path, shader->fn);
+    return pipeline ? pipeline : [g_dev newComputePipelineStateWithFunction:shader->fn error:error];
+}
 static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提交线程调用 | Called only on the submit thread
     prog_t *p = (prog_t *)cp;
     static const prog_t *lp; static uint64_t lser, lgen; static NvProg *lpr;   // 上次结果：同一对象、同一序号且序号表未变即直接用 | Last result: same object, same serial and unchanged serial table means it is used directly
@@ -2271,36 +2278,14 @@ static __unsafe_unretained NvProg *prog_get(const prog_t *cp) {   // 只在提�
     __unsafe_unretained NvProg *have = p->serial ? serial_get(p->serial) : nil;
     if (have) { lp = p; lser = p->serial; lgen = gen; lpr = have; return have; }
     shmap_load();
+    NSMutableOrderedSet<NSString *> *needed = [NSMutableOrderedSet orderedSet];
+    NSArray<NSString *> *keys = prog_collect_missing(p, needed);
+    prog_prepare_missing(needed);
     NvProg *o = [NvProg new];
     for (unsigned i = 0; i < p->nstage; i++) {
-        uint8_t md[32]; if (!zelda_shader_hash(p->sd[i].control, (const void *)(uintptr_t)p->sd[i].data, md)) {
-            const void *ctl = p->sd[i].control, *code = (const void *)(uintptr_t)p->sd[i].data;
-            if (ctl && code) MLOG("SHADER_LAYOUT magic=%x major=%u version=%u length=%u program=%u constants=%u c1=%u total=%u offset=%u stage=%u code_magic=%x",
-                shader_word(ctl, 0), shader_word(ctl, 4), shader_word(ctl, 8), shader_word(ctl, 0x20),
-                shader_word(ctl, 0x6f8), shader_word(ctl, 0x6fc), shader_word(ctl, 0x700), shader_word(ctl, 0x704),
-                shader_word(ctl, 0x708), shader_word(ctl, 0x714), shader_word(code, 0));
-            MDIE("Zelda shader data layout is unsupported");
-        }
-        NSString *k = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", md[0], md[1], md[2], md[3], md[4], md[5], md[6], md[7]];
+        NSString *k = keys[i];
         NSString *zh = g_shmap[k];
-        NSString *library = [g_msl_dir stringByAppendingPathComponent:[k stringByAppendingString:@"_b.metallib"]];
-        if (!zh || ![NSFileManager.defaultManager fileExistsAtPath:library]) {
-            NSMutableArray<NSString *> *needed = [NSMutableArray new];
-            for (unsigned j = 0; j < p->nstage; j++) {
-            const NVNshaderData *sd = &p->sd[j]; uint8_t hash[32];
-            if (!zelda_shader_hash(sd->control, (const void *)(uintptr_t)sd->data, hash)) MDIE("Invalid runtime shader");
-            NSString *key = [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x", hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7]];
-            [needed addObject:key];
-            NSMutableData *record = [NSMutableData dataWithBytes:sd->control length:shader_word(sd->control, 0x20)];
-            [record appendBytes:(const void *)(uintptr_t)sd->data length:shader_word(sd->control, 0x704)];
-            NSString *path = [NSString stringWithFormat:@"work/shaders/source/runtime-%@.nvn", key];
-            if (![record writeToFile:path options:NSDataWritingAtomic error:NULL]) MDIE("Cannot capture runtime shader");
-        }
-        MLOG("Captured Zelda shader %s", k.UTF8String);
-        zelda_compile_shaders(needed);
-        g_shmap = nil; shmap_load(); zh = g_shmap[k];
         if (!zh) { MLOG("BLOCKED shader %s absent after indexing", k.UTF8String); exit(78); }
-        }
         int st = stage_of(zh);
         NvShader *sh = st >= 0 ? shader_get([k stringByAppendingString:@"_b"], st) : nil;
         if (sh) o->sh[st] = sh; else MDIE("Zelda shader %s could not be loaded", k.UTF8String);
@@ -2612,6 +2597,22 @@ static MTLRenderPipelineDescriptor *pso_desc(const pso_key *k, NvShader *vs, NvS
     d.vertexDescriptor = vd;
     return d;
 }
+static NSString *render_binary_key(const pso_key *key, NvShader *vs, NvShader *fs, int merged) {
+    // shortcut: transformed and merged passes stay on the original path until their recipes are validated here.
+    if (merged || !vs || vs->z_layered || vs->z_wide_line || (fs && fs->z_fetch_identity.length)) return nil;
+    pso_skey stable; pso_skey_from(key, vs, fs, 0, NULL, &stable);
+    if (!zelda_recipe_state(&stable)) return nil;
+    unsigned char hash[CC_SHA256_DIGEST_LENGTH]; char text[65];
+    CC_SHA256(&stable, sizeof stable, hash);
+    for (unsigned i = 0; i < sizeof hash; i++) snprintf(text + i * 2, 3, "%02x", hash[i]);
+    return @(text);
+}
+
+static id<MTLRenderPipelineState> render_from_descriptor(MTLRenderPipelineDescriptor *descriptor, NSString *key, NSError **error) {
+    id<MTLRenderPipelineState> pipeline = shader_render_load(g_dev, descriptor, key, g_msl_dir, @ZELDA_PIPELINE_RECIPE_CONTRACT);
+    return pipeline ? pipeline : [g_dev newRenderPipelineStateWithDescriptor:descriptor error:error];
+}
+
 // 管线键：当前状态 S + 通道格式（普通通道；合并通道另带 lmap / 特化函数，由 pso_get 填）
 // Pipeline key: current state S + pass formats (normal pass; a merged pass additionally carries lmap / specialized function, filled in by pso_get)
 static void pso_key_fill(pso_key *k, NvShader *vs, NvShader *fs, const uint32_t cfmt[8], uint32_t dfmt, uint32_t sfmt, uint32_t samples, int lmap) {
@@ -2645,8 +2646,9 @@ static void pso_pend_kick(const pso_key *k, NvShader *vs, NvShader *fs) {   // �
     pthread_mutex_unlock(&g_pp_mu);
     if (at >= 0 || slot < 0) return;
     MTLRenderPipelineDescriptor *d = pso_desc(k, vs, fs, nil, 0); g_pp_kicked++;
+    NSString *binary_key = render_binary_key(k, vs, fs, 0);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *e = nil; id<MTLRenderPipelineState> ps = ZELDA_SHADER_BUILD([g_dev newRenderPipelineStateWithDescriptor:d error:&e]);
+        NSError *e = nil; id<MTLRenderPipelineState> ps = ZELDA_SHADER_BUILD(render_from_descriptor(d, binary_key, &e));
         pthread_mutex_lock(&g_pp_mu); g_pp[slot].ps = ps; g_pp[slot].done = 1; pthread_cond_broadcast(&g_pp_cv); pthread_mutex_unlock(&g_pp_mu);
     });
 }
@@ -2672,7 +2674,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> pso_get(NvProg *pr, MTLRen
     else {
         if (g_pp_submit_mark != g_sub_serial) { g_pp_submit_mark = g_sub_serial; pso_predict_rest(); }   // 本次提交第一次缺：先把后面的丢出去并行编，再同步编眼前这条 | First miss in this submission: first kick the later ones out to compile in parallel, then synchronously compile the one at hand
         MTLRenderPipelineDescriptor *d = pso_desc(&k, vs, fs, g_pso_fsfn, g_pso_lmap != NULL);
-        ps = ZELDA_SHADER_BUILD([g_dev newRenderPipelineStateWithDescriptor:d error:&e]);
+        ps = ZELDA_SHADER_BUILD(render_from_descriptor(d, render_binary_key(&k, vs, fs, g_pso_lmap != NULL), &e));
     }
     g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
     { static int log = -1; if (log < 0) log = getenv("ZELDA_PSO_LOG") != NULL;
@@ -2737,7 +2739,7 @@ static void warm_worker(NSArray<NSString *> *paths) {
                                                 if (!fsfn) { g_warm_skip_fz++; continue; }
                     }
                     pso_key k = sk.k; k.vs = (__bridge void *)vs; k.fs = (__bridge void *)fs; k.fsfn = (__bridge void *)fsfn; zelda_pso_normalize(&k, sk.merged);
-                    NSError *e = nil; id ps = ZELDA_SHADER_BUILD([g_dev newRenderPipelineStateWithDescriptor:pso_desc(&k, vs, fs, fsfn, sk.merged) error:&e]);
+                    NSError *e = nil; id ps = ZELDA_SHADER_BUILD(render_from_descriptor(pso_desc(&k, vs, fs, fsfn, sk.merged), render_binary_key(&k, vs, fs, sk.merged), &e));
                     if (!ps) { MLOG("【红】后台建渲染管线失败：%s", e.localizedDescription.UTF8String); continue; }
                     WarmItem *item = [WarmItem new]; item->kind = 1; item->vs_key = vkey; item->fs_key = fkey; item->vs = vs; item->fs = fs; item->fsfn = fsfn; item->pso = k; item->object = ps;
                     warm_enqueue(item); g_warm_rps++;
@@ -2745,7 +2747,7 @@ static void warm_worker(NSArray<NSString *> *paths) {
                     NSString *key = c[1]; if (!key.length) continue;
                     NvShader *cs = warm_shader(dict, key, 5);
                     if (!cs) continue;
-                    NSError *e = nil; id ps = ZELDA_SHADER_BUILD([g_dev newComputePipelineStateWithFunction:cs->fn error:&e]);
+                    NSError *e = nil; id ps = ZELDA_SHADER_BUILD(compute_from_shader(cs, &e));
                     if (!ps) { MLOG("【红】后台建计算管线失败：%s", e.localizedDescription.UTF8String); continue; }
                     WarmItem *item = [WarmItem new]; item->kind = 2; item->key = key; item->shader = cs; item->object = ps;
                     warm_enqueue(item); g_warm_cps++;
@@ -3387,6 +3389,7 @@ static void rt_sub(const p_set_rt *r, int k, uint64_t *ser, int *lv, int *sl);
 // 通道实际挂不挂深度 / 模板要到回放时才定（纯深度 / 纯模板 / 都不挂的省略），所以每种可能的挂法各算一条键——猜多了只是后台白编，不影响结果。
 // Prediction for parallel precompilation (see the note before pso_get): scan from after the current operation to the end of this submit, replaying only state; at a draw, compute the pipeline key from "the state at that time + that render pass's attachment formats" and dispatch those not yet built to the background.
 // Whether a render pass actually attaches depth / stencil is only decided at replay (depth-only / stencil-only / neither attached are omitted), so one key is computed for each possible attach mode -- guessing too many only means wasted background compiles and does not affect the result.
+#include "nvn_program_prefetch.inc"
 static void pso_predict_rest(void) {
     if (!g_exec_next) return;
     typeof(R) Rsave = R;
@@ -3396,9 +3399,10 @@ static void pso_predict_rest(void) {
     fz_cursor cur = {.p = g_exec_next, .ret_n = g_ret_n};
     if (g_ret_n > (int)(sizeof cur.ret / sizeof *cur.ret)) return;
     memcpy(cur.ret, g_ret, g_ret_n * sizeof *g_ret);
+    prog_prepare_rest(cur, S.prog);
     // 先收齐再丢：按「附件原样挂」的键排在前（最可能用到），其余挂法排在后——后台并发有限，先丢的先编完
     // Collect them all first, then dispatch: keys for "attachments attached as-is" go first (most likely to be used), the other attach modes after -- background concurrency is limited, and what is dispatched first is compiled first
-    enum { QN = 160 }; static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
+    enum { QN = Z_PROGRAM_PREPARE_DRAWS }; static struct { pso_key k; void *vs, *fs; } qa[QN], qb[QN]; int na = 0, nb = 0;
     for (int guard = 0; guard < 200000 && na < QN; guard++) {
         const uint8_t *q; op_hdr hq; const void *aq;
         if (!fz_next(&cur, &q, &hq, &aq)) break;
@@ -5012,7 +5016,7 @@ static void dispatch(const p_dispatch *dp) {
     const void *k = (__bridge const void *)cs;
     id<MTLComputePipelineState> ps = hm_get_id(&g_cps, &k);
     if (!ps) {
-        NSError *e = nil; uint64_t bt = bp_now(); ps = ZELDA_SHADER_BUILD([g_dev newComputePipelineStateWithFunction:cs->fn error:&e]);
+        NSError *e = nil; uint64_t bt = bp_now(); ps = ZELDA_SHADER_BUILD(compute_from_shader(cs, &e));
         g_bp_pso_n++; g_bp_pso_ns += bp_now() - bt;
         if (!ps) { MLOG("【红】建计算管线失败：%s", e.localizedDescription.UTF8String); return; }
         pso_record("C\t%s\n", cs->key);

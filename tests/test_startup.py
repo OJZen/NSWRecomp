@@ -61,7 +61,8 @@ const uint64_t sdk_fn_count = 1;
         empty_guest = cls.root / 'empty_guest.c'
         empty_guest.write_text('#include "cpu.h"\n#include <stdlib.h>\n'
                                'GuestFn rt_find_function(uint64_t a) { (void)a; return NULL; }\n'
-                               'void rt_dispatch(Cpu *c) { (void)c; abort(); }\n')
+                               'void rt_dispatch(Cpu *c) { (void)c; abort(); }\n'
+                               'void rt_udf(Cpu *c, uint64_t pc) { (void)c; (void)pc; abort(); }\n')
         subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
                         '-I', str(ROOT / 'third_party/lasrecomp/runtime'), str(empty_guest),
                         '-I', str(ROOT / 'runtime'), str(ROOT / 'runtime/kernel.c'),

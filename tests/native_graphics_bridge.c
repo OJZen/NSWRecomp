@@ -16,7 +16,8 @@ const size_t nvn_bridge_count = 1;
 void die(const char *format, ...) { (void)format; exit(78); }
 void mtl_init(void) { abort(); }
 void mtl_finish(void) { abort(); }
-void *nvn_backend_native(const char *name) { assert(!strcmp(name, "nvnSynthetic")); return (void *)synthetic; }
+GuestFn movie_find_function(uint64_t address) { (void)address; return NULL; }
+void *nvn_backend_native(size_t index) { assert(index == 0); return (void *)synthetic; }
 bool kernel_access(uint64_t address, size_t n, unsigned permissions) {
     return permissions == 1 && address >= (uintptr_t)storage && n <= sizeof storage && address - (uintptr_t)storage <= sizeof storage - n;
 }

@@ -37,7 +37,7 @@ int main(void) {
     near(performance_gpu_busy(10), 87.5);
     near(performance_gpu_busy(10.5), 75);
     near(performance_gpu_busy(13), 0);
-    for (unsigned i = 0; i < 2050; i++) performance_gpu_interval(20, 20.01);
+    for (unsigned i = 0; i < 4098; i++) performance_gpu_interval(20, 20.01);
     assert(performance_gpu_busy(21) == -1); // bounded ring exhaustion is unknown, never underreported
     near(performance_gpu_busy(23), 0);
     return 0;

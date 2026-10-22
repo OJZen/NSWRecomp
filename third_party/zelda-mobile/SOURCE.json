@@ -2580,6 +2580,31 @@
       "sha256": "7a7d664b5053540ddbda8278564cdd98fefd58818573664a9ed1739dabcdce0c",
       "adapted_as": "runtime/graphics/gamepad.m",
       "license": "Apache-2.0"
+    },
+    "host/movie.c": {
+      "sha256": "8243a92652311c391c9054663044a9c6ad6b75abd9e639b68a5ab6b5786e233a",
+      "adapted_as": "runtime/graphics/movie.c",
+      "license": "Apache-2.0"
+    },
+    "host/movie_video.c": {
+      "sha256": "c8cb5c8067b05b9a3406af8840c3cd1596eacc698f228efc5c793411479afb71",
+      "adapted_as": "runtime/graphics/movie_video.c",
+      "license": "Apache-2.0"
+    },
+    "host/movie_video.h": {
+      "sha256": "41012eef752c287c42f9246eb60ab0c5263026b3163e19cf2cefc379da227493",
+      "adapted_as": "runtime/graphics/movie_video.h",
+      "license": "Apache-2.0"
+    },
+    "tests/test_movie.c": {
+      "sha256": "7bf49f331e1245f6af89f544a70aedaa76e08a5bb761b503c8647512fac9278e",
+      "adapted_as": "tests/native_movie.c",
+      "license": "Apache-2.0"
+    },
+    "tests/test_movie_video.c": {
+      "sha256": "475c6a5c670eafd047a7096e7f1dee08c82f95d9e0c89d8da521358f990a19e4",
+      "adapted_as": "tests/native_movie_video.c",
+      "license": "Apache-2.0"
     }
   },
   "layout_reference": {
@@ -2588,5 +2613,11 @@
     "license": "MIT",
     "license_sha256": "5811600bb8fc4522d3310e8e0e637a1bb14b7c64412f8cfc6234872eb53129b9"
   },
-  "graphics_note": "Pinned NVN/Metal sources with committed Zelda adapters applied. ARM64 entry thunks and game-derived builtin shaders are excluded; Cpu bridges are separate."
+  "graphics_note": "Pinned NVN/Metal sources with committed Zelda adapters applied. ARM64 entry thunks and game-derived builtin shaders are excluded; Cpu bridges are separate.",
+  "timing_reference": {
+    "revision": "b96b5fe51a634357c91b8ab997fa0ae4298bf80c",
+    "path": "tools/game_timing.py",
+    "sha256": "5216794ee93e41bd3c6fcb8c11c27bc9c22836bec0ecc9e81f813765c75fd111",
+    "adapted_as": "runtime/game_timing.c"
+  }
 }

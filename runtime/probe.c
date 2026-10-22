@@ -30,20 +30,27 @@ static void stop(void) __attribute__((noreturn));
 static void stop(void) { fputs("probe reached unsupported runtime work\n", stderr); exit(78); }
 __attribute__((weak)) GuestFn rt_find_external(uint64_t address) { (void)address; return NULL; }
 __attribute__((weak)) void rt_report_missing(Cpu *cpu) { (void)cpu; }
+// Adapted from LASRecomp runtime/dispatch.c (MIT); only immutable compiled functions enter this cache.
+enum { DISPATCH_CACHE_SIZE = 4096 };
+static _Thread_local struct { uint64_t address; GuestFn function; } dispatch_cache[DISPATCH_CACHE_SIZE];
 GuestFn rt_find_function(uint64_t address) {
     for (unsigned t = 0; t < sizeof tables / sizeof *tables; t++) {
         uint64_t lo = 0, hi = *tables[t].count;
+        if (!hi || address < tables[t].addresses[0] || address > tables[t].addresses[hi - 1]) continue;
         while (lo < hi) {
             uint64_t mid = lo + (hi - lo) / 2;
             if (tables[t].addresses[mid] < address) lo = mid + 1;
             else hi = mid;
         }
-        if (lo < *tables[t].count && tables[t].addresses[lo] == address)
-            return tables[t].functions[lo];
+        if (lo < *tables[t].count && tables[t].addresses[lo] == address) {
+            unsigned slot = (unsigned)(address >> 2) & (DISPATCH_CACHE_SIZE - 1);
+            dispatch_cache[slot].address = address;
+            return dispatch_cache[slot].function = tables[t].functions[lo];
+        }
     }
     return rt_find_external(address);
 }
-void rt_dispatch(Cpu *c) {
+__attribute__((noinline)) static void dispatch_miss(Cpu *c) {
     GuestFn function = rt_find_function(c->pc);
     if (!function) {
         rt_report_missing(c);
@@ -52,6 +59,13 @@ void rt_dispatch(Cpu *c) {
         stop();
     }
     __attribute__((musttail)) return function(c);
+}
+void rt_dispatch(Cpu *c) {
+    unsigned slot = (unsigned)(c->pc >> 2) & (DISPATCH_CACHE_SIZE - 1);
+    GuestFn function = dispatch_cache[slot].function;
+    if (__builtin_expect(function && dispatch_cache[slot].address == c->pc, 1))
+        __attribute__((musttail)) return function(c);
+    __attribute__((musttail)) return dispatch_miss(c);
 }
 #ifndef TOTK_STARTUP
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc) { (void)c; (void)imm; (void)pc; stop(); }

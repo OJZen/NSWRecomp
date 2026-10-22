@@ -6,6 +6,7 @@
 #include "input.h"
 #include "gamepad.h"
 #include "control_panel.h"
+#include "timeline.h"
 #include <stdatomic.h>
 #include <mach/mach.h>
 
@@ -45,11 +46,6 @@ uint32_t front_vsync_handle(void) {
     pthread_mutex_unlock(&vsync_lock);
     return handle;
 }
-// Optional precompiled IR is absent; Metal compiles the translated source with the same options.
-id<MTLLibrary> shader_ir_load(id<MTLDevice> device, NSString *path, const void *source, size_t length, bool layered) {
-    (void)device; (void)path; (void)source; (void)length; (void)layered; return nil;
-}
-void shader_ir_report(const char *phase) { (void)phase; }
 static atomic_uint shader_builds;
 static pthread_mutex_t shader_compile_lock = PTHREAD_MUTEX_INITIALIZER;
 void shader_status_note(unsigned event, unsigned total) {
@@ -74,6 +70,7 @@ ZeldaShaderStatus shader_status_snapshot(void) { return (ZeldaShaderStatus){.act
     NSView *view = self.window.contentView;
     layer.contentsScale = self.window.backingScaleFactor;
     layer.drawableSize = [view convertSizeToBacking:view.bounds.size];
+    LOG("Window drawable=%.0fx%.0f backing_scale=%.1f", layer.drawableSize.width, layer.drawableSize.height, layer.contentsScale);
 }
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification { [self windowDidResize:notification]; }
 - (void)windowDidResignKey:(NSNotification *)notification { (void)notification; gamepad_active(false); }
@@ -115,6 +112,16 @@ int main(int argc, char **argv) {
         layer.pixelFormat = MTLPixelFormatBGRA8Unorm; layer.framebufferOnly = YES;
         window.contentView.wantsLayer = YES; window.contentView.layer = layer;
         delegate.panel = [[TotkControlPanel alloc] initWithGameWindow:window layer:layer];
+        const char *trace = getenv("TOTK_TIMELINE");
+        if (trace && *trace) {
+            NSString *path = @(trace);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (!zelda_timeline_start()) { LOG("Timeline start failed"); return; }
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                    LOG("Timeline bounded capture complete=%d", zelda_timeline_stop(path.fileSystemRepresentation));
+                });
+            });
+        }
         NSTitlebarAccessoryViewController *accessory = [NSTitlebarAccessoryViewController new];
         NSButton *controls = [NSButton buttonWithTitle:@"控制面板" target:delegate.panel action:@selector(showPanel:)];
         controls.frame = NSMakeRect(0, 0, 90, 26); controls.toolTip = @"性能、声音与手柄（⌘,）";

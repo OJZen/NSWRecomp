@@ -7,6 +7,8 @@ Its exact revision and file digests are recorded in `third_party/lasrecomp/SOURC
 The subset includes NSO analysis/generation, synthetic tests and portable CPU helpers;
 the Link's Awakening patch tables, randomizer, UI and game content are not included.
 Use this subset through `tools/recompile.py`, which always disables game-specific patches.
+The static function cache in `runtime/probe.c` adapts LASRecomp's MIT
+`runtime/dispatch.c`; its revision and source digest are also recorded in that manifest.
 
 Development dependencies are installed separately, not vendored or linked into a game:
 
@@ -30,11 +32,25 @@ design also follows d2r-mobile's CoreAudio queue. Building
 does not read the neighboring reference repository. Nintendo properties and user-supplied game files
 are not covered by this project's or LASRecomp's license.
 
+`runtime/game_timing.c` adapts Zelda-Mobile's elapsed-time stepping from
+`tools/game_timing.py` at `b96b5fe51a634357c91b8ab997fa0ae4298bf80c` under Apache-2.0.
+The separate timing source digest is recorded in `third_party/zelda-mobile/SOURCE.json`.
+Version-specific timing fields and sites were identified by masagrator's
+[FPSLocker configuration](https://github.com/masagrator/FPSLocker-Warehouse/blob/v4/SaltySD/plugins/FPSLocker/patches/0100F2C0115B6000/277178B7DBA1B6D4.yaml).
+
 The startup probe links the separately installed [Opus](https://opus-codec.org/license/)
 library (BSD 3-clause, installed version 1.6.1 in the validation environment).
 Its source, headers and library are not vendored. Apple AudioToolbox/CoreAudio
 are system frameworks. Synthetic audio tests run with speaker output disabled;
 they do not establish audible game playback.
+
+`runtime/graphics/movie.c`, `movie_video.c` and `movie_video.h`, together with
+the synthetic movie tests, adapt the pinned Zelda-Mobile Apache-2.0 decoder.
+The local bridge uses compiled `Cpu` callbacks and guest allocations for SDK
+thread objects and input buffers. The graphics host links separately installed
+[libvpx](https://chromium.googlesource.com/webm/libvpx/+/refs/heads/main/LICENSE)
+(BSD 3-clause; validation environment 1.17.0) for VP8/VP9 decoding to NV12.
+Its source and binaries are not vendored; tests generate their own video frames.
 
 The frame statistics and GameController adapter in `runtime/graphics/performance.c`
 and `gamepad.m` adapt the same pinned Zelda-Mobile host sources under Apache-2.0.

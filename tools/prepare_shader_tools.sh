@@ -38,7 +38,8 @@ anchor = 'public bool QueryHostSupportsTextureShadowLod() => true;'
 if code.count(anchor) != 1:
     raise SystemExit('Inspect the upstream host capability queries before preparing the translator')
 # Metal has no FP64; reuse the translator's existing double-to-float lowering.
-code = code.replace(anchor, 'public bool QueryHostSupportsDepthClipControl() => false;\n        public bool QueryHostSupportsShaderFloat64() => false;\n        ' + anchor)
+# SPIR-V requires constant texture offsets; the existing texture pass lowers dynamic offsets into coordinates.
+code = code.replace(anchor, 'public bool QueryHostSupportsDepthClipControl() => false;\n        public bool QueryHostSupportsShaderFloat64() => false;\n        public bool QueryHostSupportsNonConstantTextureOffset() => false;\n        ' + anchor)
 anchor = 'ShaderProgram p = ctx.Translate();'
 if code.count(anchor) != 1:
     raise SystemExit('Inspect the upstream shader translation entry before preparing the translator')

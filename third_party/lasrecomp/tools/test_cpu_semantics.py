@@ -29,6 +29,8 @@ def pair_words(size, acquire, release, regs):
 
 
 class CpuSemanticsTests(unittest.TestCase):
+    optimization = '-O1'
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix='cpu-semantics-')
@@ -56,7 +58,7 @@ class CpuSemanticsTests(unittest.TestCase):
         source.write_text('\n'.join(code))
         library = cls.directory / 'cases.so'
         flags = ['-march=x86-64-v3'] if platform.machine().lower() in ('amd64', 'x86_64') else []
-        subprocess.run(['clang', *flags, '-O1', '-fno-strict-aliasing', '-shared', '-fPIC', '-pthread',
+        subprocess.run(['clang', *flags, cls.optimization, '-fno-strict-aliasing', '-shared', '-fPIC', '-pthread',
                         '-I', str(ROOT / 'runtime'), str(source), str(ROOT / 'tools/test_cpu_native.c'),
                         '-lm', '-o', str(library)], check=True, timeout=60, capture_output=True)
         cls.lib = ctypes.CDLL(str(library))
@@ -130,11 +132,18 @@ class CpuSemanticsTests(unittest.TestCase):
                     with self.subTest(index=index, fpcr=fpcr, seed=seed):
                         self.compare([word], f'fp{index}', seed, fpcr=fpcr)
 
+    def test_host_rounding_preserves_control_and_status(self):
+        self.assertEqual(self.lib.test_host_rounding(), 0)
+
     def test_invalid_pair_forms_stay_unsupported(self):
         load, store = pair_words(3, 1, 1, CONFIGS[0])
         for a, b in ((load, store ^ (1 << 30)), (load, store ^ (1 << 5)),
                      (load & 0x3fffffff, store & 0x3fffffff), (load, 0xd503201f)):
             self.assertIsNone(exclusive_pair_transaction(a, b, CODE))
+
+
+class CpuSemanticsO2Tests(CpuSemanticsTests):
+    optimization = '-O2'
 
 
 if __name__ == '__main__':

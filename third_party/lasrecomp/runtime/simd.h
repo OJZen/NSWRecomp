@@ -222,6 +222,10 @@ SI int simd_host_round(void) {
 #if defined(__x86_64__) && defined(__SSE2__)
     static const int modes[4] = {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO};
     return modes[(__builtin_ia32_stmxcsr() >> 13) & 3];
+#elif defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    return simd_fe_mode(fpcr);
 #else
     return fegetround();
 #endif
@@ -231,6 +235,12 @@ SI void simd_set_host_round(int mode) {
     unsigned round = mode == FE_UPWARD ? 2 : mode == FE_DOWNWARD ? 1 : mode == FE_TOWARDZERO ? 3 : 0;
     unsigned old = __builtin_ia32_stmxcsr(), next = (old & ~0x6000u) | (round << 13);
     if (old != next) __builtin_ia32_ldmxcsr(next);
+#elif defined(__aarch64__)
+    uint64_t old;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(old));
+    uint64_t round = mode == FE_UPWARD ? 1 : mode == FE_DOWNWARD ? 2 : mode == FE_TOWARDZERO ? 3 : 0;
+    uint64_t next = (old & ~(3ull << 22)) | (round << 22);
+    if (old != next) __asm__ volatile("msr fpcr, %0" :: "r"(next) : "memory");
 #else
     fesetround(mode);
 #endif

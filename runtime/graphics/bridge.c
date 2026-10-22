@@ -2,10 +2,10 @@
 #include "nvn_bridge.h"
 #include "host_compat.h"
 #include "nvn_mtl.h"
+#include "movie.h"
 
 // Tokens occupy no executable host pages and cannot alias the mapped guest modules.
 #define NVN_BASE 0x7f00000000ull
-void *nvn_backend_native(const char *name);
 
 uint64_t nvn_guest_address(const char *name) {
     if (!name) return 0;
@@ -17,11 +17,11 @@ uint64_t nvn_guest_address(const char *name) {
 
 GuestFn rt_find_external(uint64_t address) {
     uint64_t offset = address - NVN_BASE;
-    return !(offset & 3) && offset / 4 < nvn_bridge_count ? nvn_bridge_entries[offset / 4].call : NULL;
+    return !(offset & 3) && offset / 4 < nvn_bridge_count ? nvn_bridge_entries[offset / 4].call : movie_find_function(address);
 }
 
 void *nvn_bridge_native(size_t index) {
-    return index < nvn_bridge_count ? nvn_backend_native(nvn_bridge_entries[index].name) : NULL;
+    return index < nvn_bridge_count ? nvn_backend_native(index) : NULL;
 }
 
 void nvn_bridge_unavailable(Cpu *c, const char *name) {

@@ -32,11 +32,13 @@ class NvnBridgeTests(unittest.TestCase):
     def test_guest_tokens_and_callback_state_isolation(self):
         with tempfile.TemporaryDirectory(prefix='graphics-bridge-test-') as temp:
             binary = Path(temp) / 'check'
-            subprocess.run(['clang', '-std=gnu11', '-O1', '-g', '-fsanitize=address,undefined',
+            subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-g', '-fsanitize=address,undefined',
                             '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'runtime'),
                             '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
+                            '-I', str(ROOT / 'runtime/graphics'),
                             '-I', str(ROOT / 'runtime/graphics/include'), '-I', str(ROOT / 'runtime/graphics/nvn'),
                             str(ROOT / 'runtime/graphics/bridge.c'), str(ROOT / 'tests/native_graphics_bridge.c'),
+                            '-Xlinker', '-object_path_lto', '-Xlinker', str(Path(temp) / 'lto'),
                             '-o', str(binary)], check=True, capture_output=True, timeout=30)
             for args, code in (([], 0), (['unbalanced'], 78)):
                 result = subprocess.run([str(binary), *args], capture_output=True, text=True, timeout=5)
@@ -49,7 +51,7 @@ class NvnBridgeTests(unittest.TestCase):
             directory = Path(temp)
             path = directory / 'bridge.c'
             path.write_text(source)
-            subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
+            subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-Wall', '-Wextra', '-Werror',
                             '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
                             '-I', str(HEADERS), '-I', str(HEADERS / 'include'),
                             '-c', str(path), '-o', str(directory / 'bridge.o')], check=True, timeout=30, capture_output=True)
@@ -63,10 +65,11 @@ class NvnBridgeTests(unittest.TestCase):
             path = directory / 'bridge.c'
             path.write_text(source)
             binary = directory / 'check'
-            subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
+            subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-Wall', '-Wextra', '-Werror',
                             '-I', str(directory), '-I', str(ROOT / 'runtime'),
                             '-I', str(ROOT / 'third_party/lasrecomp/runtime'), str(path),
-                            str(ROOT / 'tests/native_nvn_bridge.c'), '-o', str(binary)],
+                            str(ROOT / 'tests/native_nvn_bridge.c'),
+                            '-Xlinker', '-object_path_lto', '-Xlinker', str(directory / 'lto'), '-o', str(binary)],
                            check=True, timeout=30, capture_output=True)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)

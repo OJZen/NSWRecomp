@@ -144,6 +144,8 @@ def repeat(value, bits):
 
 
 class FpsrTests(unittest.TestCase):
+    optimization = '-O1'
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix='fpsr-')
@@ -161,7 +163,7 @@ class FpsrTests(unittest.TestCase):
             code += [f'void c{i}(Cpu *c) {{ {body} }}', hardware_function(i, words)]
         source, library = directory / 'lifted.c', directory / 'lifted.so'
         source.write_text('\n'.join(code))
-        subprocess.run(['clang', '-O1', '-fno-strict-aliasing', '-shared', '-fPIC', '-I', str(ROOT / 'runtime'),
+        subprocess.run(['clang', cls.optimization, '-fno-strict-aliasing', '-shared', '-fPIC', '-I', str(ROOT / 'runtime'),
                         str(source), '-lm', '-o', str(library)], check=True, timeout=60)
         cls.lib = ctypes.CDLL(str(library))
         cls.hw = platform.machine().lower() in ('arm64', 'aarch64')
@@ -267,6 +269,10 @@ class FpsrTests(unittest.TestCase):
         state = self.compare(i, 0, 0, 0, 0, x1=(1 << 64) - 1, hardware=False)
         self.assertEqual(state[3], 0xf800009f)  # Cortex-A57 retains AArch32 condition fields.
         self.assertEqual(state[2], 0)
+
+
+class FpsrO2Tests(FpsrTests):
+    optimization = '-O2'
 
 
 if __name__ == '__main__':

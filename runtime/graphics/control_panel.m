@@ -2,6 +2,7 @@
 #include "performance.h"
 #include "gamepad.h"
 #include "audio.h"
+#include "game_timing.h"
 #include <mach/mach.h>
 #include <sys/resource.h>
 #include <math.h>
@@ -12,6 +13,7 @@ enum { FPS, RENDER_FPS, P95, CPU, GPU, CPU_FRAME, SUBMIT, GPU_FRAME, RESOLUTION,
     CAMetalLayer *metal_layer;
     NSTextField *values[METRIC_COUNT], *state, *controller, *input;
     NSButton *sound;
+    NSSegmentedControl *frame_rate;
     NSTimer *timer;
     double last_time, last_cpu;
     uint64_t last_frame;
@@ -24,7 +26,20 @@ static NSString *milliseconds(double value) {
     return value >= 0 && isfinite(value) ? [NSString stringWithFormat:@"%.2f ms", value] : @"—";
 }
 - (instancetype)initWithGameWindow:(NSWindow *)window layer:(CAMetalLayer *)layer {
-    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 480, 680)
+    audio_mute([NSUserDefaults.standardUserDefaults boolForKey:@"AudioMuted"]);
+    unsigned fps = (unsigned)[NSUserDefaults.standardUserDefaults integerForKey:@"TargetFPS"];
+    if (!timing_set_target(fps)) timing_set_target(30);
+    const char *override = getenv("TOTK_TARGET_FPS");
+    if (override) {
+        if (!strcmp(override, "30")) fps = 30;
+        else if (!strcmp(override, "60")) fps = 60;
+        else if (!strcmp(override, "90")) fps = 90;
+        else if (!strcmp(override, "120")) fps = 120;
+        else { fputs("TOTK_TARGET_FPS must be 30, 60, 90 or 120\n", stderr); exit(78); }
+        timing_set_target(fps);
+    }
+    fprintf(stderr, "TIMING target=%u movie=30 clock_scale=1\n", timing_target());
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 480, 740)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow
         backing:NSBackingStoreBuffered defer:NO];
     self = [super initWithWindow:panel]; if (!self) return nil;
@@ -41,6 +56,13 @@ static NSString *milliseconds(double value) {
     [stack addArrangedSubview:label(@"性能监测", 20, NSFontWeightSemibold)];
     state = label(@"等待游戏出帧…", 12, NSFontWeightRegular); state.textColor = NSColor.secondaryLabelColor;
     [stack addArrangedSubview:state];
+    frame_rate = [NSSegmentedControl segmentedControlWithLabels:@[@"30", @"60", @"90", @"120"]
+        trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(frameRateChanged:)];
+    frame_rate.selectedSegment = timing_target() / 30 - 1;
+    frame_rate.accessibilityLabel = @"目标帧率";
+    frame_rate.toolTip = @"立即生效并记住选择；预渲染影片保持 30 FPS。实际帧率取决于负载与显示器。";
+    NSStackView *fps_row = [NSStackView stackViewWithViews:@[label(@"目标帧率", 13, NSFontWeightMedium), frame_rate]];
+    fps_row.spacing = 14; [stack addArrangedSubview:fps_row];
     NSArray *names = @[@"呈现帧率", @"游戏出帧率", @"帧间隔 P95", @"CPU 占用 · 本进程", @"GPU 占用 · 忙碌估算",
         @"CPU / 帧 · 全进程", @"CPU / 帧 · 图形提交", @"GPU / 帧 · 命令耗时", @"游戏渲染分辨率", @"窗口输出分辨率", @"物理内存", @"绘制调用 / 帧"];
     NSMutableArray *rows = [NSMutableArray new];
@@ -64,6 +86,7 @@ static NSString *milliseconds(double value) {
     [stack addArrangedSubview:note]; [note.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
     [stack addArrangedSubview:label(@"声音与手柄", 16, NSFontWeightSemibold)];
     sound = [NSButton checkboxWithTitle:@"播放游戏声音" target:self action:@selector(soundChanged:)];
+    sound.toolTip = @"立即生效并记住选择。";
     sound.state = audio_muted() ? NSControlStateValueOff : NSControlStateValueOn;
     const char *setting = getenv("DM_AUDIO");
     if (setting && !strcmp(setting, "0")) { sound.enabled = NO; sound.state = NSControlStateValueOff; sound.title = @"启动参数 DM_AUDIO=0 已禁用声音设备"; }
@@ -85,7 +108,19 @@ static NSString *milliseconds(double value) {
 - (void)dealloc { [timer invalidate]; }
 - (void)showPanel:(id)sender { (void)sender; [self refresh]; [self.window makeKeyAndOrderFront:nil]; }
 - (void)returnToGame:(id)sender { (void)sender; [game_window makeKeyAndOrderFront:nil]; [game_window makeFirstResponder:game_window.contentView]; }
-- (void)soundChanged:(NSButton *)sender { audio_mute(sender.state != NSControlStateValueOn); }
+- (void)soundChanged:(NSButton *)sender {
+    bool muted = sender.state != NSControlStateValueOn;
+    audio_mute(muted);
+    [NSUserDefaults.standardUserDefaults setBool:muted forKey:@"AudioMuted"];
+}
+- (void)frameRateChanged:(NSSegmentedControl *)sender {
+    unsigned fps = (unsigned)(sender.selectedSegment + 1) * 30;
+    if (!timing_set_target(fps)) return;
+    [NSUserDefaults.standardUserDefaults setInteger:fps forKey:@"TargetFPS"];
+    performance_reset_window();
+    fprintf(stderr, "TIMING target=%u source=control_panel\n", fps);
+    [self refresh];
+}
 - (void)refresh {
     ZeldaPerformance p; bool ready = performance_snapshot(&p);
     double now = CACurrentMediaTime(); bool live = ready && now - p.last_rendered < 2;

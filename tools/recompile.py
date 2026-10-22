@@ -13,6 +13,7 @@ from bounded import run
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / 'third_party/lasrecomp'
 PROFILE = ROOT / 'config/totk-1.4.3.json'
+HOOKS = ROOT / 'config/totk-1.4.3-hooks.json'
 HLE_SYMBOLS = ROOT / 'runtime/hle_symbols.inc'
 sys.path.insert(0, str(VENDOR / 'tools'))
 from analyze import eh_frame_functions
@@ -67,10 +68,11 @@ def inspect(exefs):
 
 
 def generation_inputs(info):
-    sources = sorted((VENDOR / 'tools').glob('*.py'))
+    sources = sorted(p for p in (VENDOR / 'tools').glob('*.py') if not p.name.startswith('test_'))
     return {'schema': 1, 'module': info, 'simd': 'c', 'game_patches': False,
             'generator': {p.name: digest(p) for p in sources}, 'profile': digest(PROFILE),
-            'hle_symbols': digest(HLE_SYMBOLS)}
+            'hle_symbols': digest(HLE_SYMBOLS),
+            'hooks': digest(HOOKS) if info == profile()['modules']['main'] else None}
 
 
 def hle_symbols():
@@ -126,7 +128,8 @@ def generate(exefs, name):
         log = ROOT / 'work/logs' / f'generate-{name}.log'
         metrics = run([sys.executable, str(VENDOR / 'tools/gen.py'), name, str(exefs / name),
                        info['base'], str(staged), '--simd', 'c', '--no-game-patches',
-                       '--cache-limit', '32768', '--chunk-bytes', '500000', '--hle', str(bindings)], cwd=ROOT, log=log)
+                       '--cache-limit', '32768', '--chunk-bytes', '500000', '--hle', str(bindings),
+                       *(['--hooks', str(HOOKS)] if name == 'main' else [])], cwd=ROOT, log=log)
         files = {p.name: digest(p) for p in sorted(staged.glob('*.c'))}
         result = {'inputs': inputs, 'files': files,
                   'generated_bytes': sum(p.stat().st_size for p in staged.glob('*.c')),

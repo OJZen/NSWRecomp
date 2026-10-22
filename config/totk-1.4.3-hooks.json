@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "hooks": [
+    {"offset": "0x2db18c", "expected": "0x39416009", "targets": ["0x2db284"]},
+    {"offset": "0x2daa54", "expected": "0xbd425260", "targets": []},
+    {"offset": "0x2daa6c", "expected": "0x5e21d800", "targets": []},
+    {"offset": "0x3e562c", "expected": "0xbd4252c0", "targets": []},
+    {"offset": "0x3e5638", "expected": "0x5e21d800", "targets": []},
+    {"offset": "0xbe14a8", "expected": "0x3940a261", "targets": []},
+    {"offset": "0x2b36100", "expected": "0x9770f3b6", "targets": []},
+    {"offset": "0x2b33918", "expected": "0x140217de", "targets": []},
+    {"offset": "0x1fbc80", "expected": "0x1e202008", "targets": []}
+  ]
+}

@@ -36,16 +36,19 @@ if __name__ == '__main__':
     parser.add_argument('--exefs', type=Path)
     parser.add_argument('--romfs', type=Path)
     parser.add_argument('--seconds', type=int, choices=range(1, 601), metavar='1..600', default=180)
+    parser.add_argument('--fps', type=int, choices=(30, 60, 90, 120), help='override the saved frame rate for this run')
+    parser.add_argument('--jobs', type=int, choices=range(1, 33), metavar='1..32', help='compiler concurrency; default up to 8 CPU cores')
     args = parser.parse_args()
     try:
         prepare_work()
+        if args.fps is not None: os.environ['TOTK_TARGET_FPS'] = str(args.fps)
         settings = ROOT / 'local/inputs.json'
         inputs = json.loads(settings.read_text()) if settings.is_file() else {}
         exefs = args.exefs or (Path(inputs['exefs']) if inputs.get('exefs') else None)
         romfs = args.romfs or (Path(inputs['romfs']) if inputs.get('romfs') else None)
         if not exefs or not romfs: raise ValueError('Import your NSZ packages first, or provide --exefs and --romfs')
         stop_previous()
-        build(exefs.resolve())
+        build(exefs.resolve(), jobs=args.jobs)
         result = startup(exefs.resolve(), 'nnMain', romfs.resolve(), graphics=True, seconds=args.seconds)
         print(json.dumps({k: result[k] for k in ('status', 'exit_code', 'native', 'title_verified')}, indent=2))
         if result['exit_code']: parser.exit(2, 'native startup stopped; see work/logs/startup.log\n')

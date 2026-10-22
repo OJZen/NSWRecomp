@@ -17,6 +17,19 @@ from test_nso import fixture
 
 
 class HleTests(unittest.TestCase):
+    def test_dispatch_cache_collisions_threads_and_dynamic_external_bindings(self):
+        with tempfile.TemporaryDirectory(prefix='dispatch-test-') as temp:
+            binary = Path(temp) / 'check'
+            subprocess.run(['clang', '-std=gnu11', '-O2', '-pthread', '-fsanitize=address,undefined',
+                            '-I', str(ROOT / 'third_party/lasrecomp/runtime'), '-I', str(ROOT / 'runtime'),
+                            str(ROOT / 'runtime/probe.c'), str(ROOT / 'tests/native_dispatch.c'),
+                            '-o', str(binary)], check=True, capture_output=True, timeout=30)
+            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            missing = subprocess.run([str(binary), 'missing'], capture_output=True, text=True, timeout=5)
+            self.assertEqual(missing.returncode, 78, missing.stderr)
+            self.assertIn('missing compiled function: pc=0', missing.stderr)
+
     def test_compiled_calls_and_dispatch_require_an_implemented_backend(self):
         with tempfile.TemporaryDirectory(prefix='hle-test-') as temp:
             directory = Path(temp)
@@ -37,14 +50,19 @@ class HleTests(unittest.TestCase):
             main.write_text('''#include "cpu.h"
 #include <assert.h>
 void f_100088(Cpu *);
+GuestFn rt_find_function(uint64_t);
 int main(void) {
     Cpu c = {0}; c.x[0] = 11; f_100088(&c); assert(c.x[0] == 42);
     c.x[0] = 11; c.pc = 0x100080; rt_dispatch(&c); assert(c.x[0] == 42);
+    assert(rt_find_function(0x100080) && rt_find_function(0x100088));
+    assert(!rt_find_function(0) && !rt_find_function(UINT64_MAX));
+    c.pc = 0x7f00000000; rt_dispatch(&c); assert(c.x[0] == 73);
     return 0;
 }
 ''')
             native = directory / 'native.c'
-            native.write_text('#include "cpu.h"\nvoid hle_nvnBootstrapLoader(Cpu *c) { c->x[0] += 31; }\n')
+            native.write_text('#include "cpu.h"\nvoid hle_nvnBootstrapLoader(Cpu *c) { c->x[0] += 31; }\n'
+                              'GuestFn rt_find_external(uint64_t a) { return a == 0x7f00000000 ? hle_nvnBootstrapLoader : NULL; }\n')
             command = ['clang', '-std=gnu11', '-O1', '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
                        *map(str, generated.glob('*.c')), str(ROOT / 'runtime/probe.c'),
                        str(ROOT / 'runtime/hle.c'), str(main)]

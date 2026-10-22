@@ -25,6 +25,8 @@
 #include "nvn_tex.h"
 #include "nvn_mtl.h"
 #include "nvn_pace.h"
+#include "game_timing.h"
+#include "nvn_bridge.h"
 #include "host_compat.h"
 #include "nvn_dirty.h"
 #include <mach/mach_time.h>
@@ -453,7 +455,7 @@ NVN(nvnSyncInitialize, NVNboolean, NVNsync *s, NVNdevice *d) { (void)d; *(sync_t
 NVN(nvnSyncFinalize, void, NVNsync *s) { ((sync_t *)s)->magic = 0; }
 // 围栏 = 「此前提交到队列的命令全部完成」：记下最近一次提交的栅栏值
 // Fence = "all commands previously submitted to the queue have completed": record the fence value of the most recent submit
-NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); zelda_timeline(TL_FENCE, zelda_timeline_now(), ((sync_t *)s)->fence, 0); }
+NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; ((sync_t *)s)->fenced = 1; ((sync_t *)s)->fence = mtl_last_fence(); zelda_timeline(TL_FENCE, zelda_timeline_now(), ((sync_t *)s)->fence, (uint64_t)(uint32_t)f << 32 | (uint32_t)c); }
 // 没围栏过的同步对象按真机行为等到超时；已围栏的只在 GPU 真正完成到该栅栏值后放行
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 NVN(nvnSyncWait, NVNsyncWaitResult, const NVNsync *s, uint64_t timeout) {
@@ -1118,7 +1120,6 @@ static void dump_frame(void) {
 static double g_tw[6][TWIN]; static unsigned g_tn[6];
 static double g_pres_iv[TWIN]; static unsigned g_presn;   // 上屏间隔（ms；−1 = 被系统丢弃，0 = 无读数） | Present interval (ms; -1 = dropped by the system, 0 = no reading)
 __attribute__((weak)) double dm_brightness_now(void) { return -1; }
-__attribute__((weak)) unsigned zelda_game_frame_rate(void) { return 0; }
 __attribute__((weak)) void zelda_perf_present(uint64_t f, double t, double gpu, uint64_t cpu, uint64_t draws, uint64_t upload, double rendered_at, double pacing_fps, int forced) {
     (void)f; (void)t; (void)gpu; (void)cpu; (void)draws; (void)upload; (void)rendered_at; (void)pacing_fps; (void)forced;
 }
@@ -1306,7 +1307,7 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         static uint64_t acc[NVN_NFUNC];
         for (unsigned i = 0; i < NVN_NFUNC; i++) { uint64_t t = atomic_exchange(&nvn_prof_ticks[i], 0); acc[i] += t; if (i == isub) sub = t; else rec += t; }
         if ((g_frame + 1) % TWIN == 0) {   // 每 300 帧列出耗时最多的 5 个函数 | every 300 frames list the 5 most time-consuming functions
-            char line[1024]; size_t o = 0;
+            char line[1024] = {0}; size_t o = 0;
             for (int k = 0; k < 5; k++) { unsigned best = 0; for (unsigned i = 1; i < NVN_NFUNC; i++) if (acc[i] > acc[best]) best = i;
                 if (!acc[best]) break; o += snprintf(line + o, sizeof line - o, " %s %.2f ms；", nvn_names[best] + 3, acc[best] * tb.numer / tb.denom / 1e6); acc[best] = 0; }
             LOG("[nvn] 翻译层耗时前 5（近 300 帧合计）：%s", line); memset(acc, 0, sizeof acc);
@@ -1358,6 +1359,9 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
         }
         plib = lib_; ppso = pso_;
         trow(f, "@t_s", (now_ns() - g_t0_ns) / 1e9);
+        trow(f, "@game_s", zelda_game_seconds());
+        trow(f, "@game_frames", (double)timing_frames());
+        trow(f, "@target_fps", timing_target());
         trow(f, "@drawable_ms", mtl_drawable_ns_take() / 1e6);
         trow(f, "@sub_wall_ms", atomic_exchange(&g_sub_wall_ns, 0) / 1e6); trow(f, "@sub_cpu_ms", atomic_exchange(&g_sub_cpu_ns, 0) / 1e6); trow(f, "@sub_instr", (double)atomic_exchange(&g_sub_instr, 0));
     } else atomic_store(&g_nvn_ns, 0);
@@ -1414,12 +1418,25 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
 
 #include "nvn_extra.inc"
 
-void *nvn_backend_native(const char *name) {
+static int *bridge_slots;
+static void resolve_bridge_slots(void) {
     nvn_init_slots();
-    if (!strcmp(name, "nvnCommandBufferBindTexturesDeferred")) return (void *)h_nvnCommandBufferBindTexturesDeferred;
-    for (unsigned i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], name)) {
-        nvn_slot[i].cnt++;
-        return nvn_slot[i].fn == (void *)nvn_unimpl_entry ? NULL : nvn_slot[i].fn;
+    bridge_slots = malloc(nvn_bridge_count * sizeof *bridge_slots);
+    if (!bridge_slots) die("Cannot allocate NVN dispatch map");
+    for (size_t b = 0; b < nvn_bridge_count; b++) {
+        const char *name = nvn_bridge_entries[b].name;
+        bridge_slots[b] = -1;
+        if (!strcmp(name, "nvnCommandBufferBindTexturesDeferred")) { bridge_slots[b] = NVN_NFUNC; continue; }
+        for (unsigned i = 0; i < NVN_NFUNC; i++) if (!strcmp(nvn_names[i], name)) { bridge_slots[b] = (int)i; break; }
     }
-    return NULL;
+}
+void *nvn_backend_native(size_t index) {
+    if (index >= nvn_bridge_count) return NULL;
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, resolve_bridge_slots);
+    int slot = bridge_slots[index];
+    if (slot == NVN_NFUNC) return (void *)h_nvnCommandBufferBindTexturesDeferred;
+    if (slot < 0) return NULL;
+    atomic_fetch_add_explicit(&nvn_slot[slot].cnt, 1, memory_order_relaxed);
+    return nvn_slot[slot].fn == (void *)nvn_unimpl_entry ? NULL : nvn_slot[slot].fn;
 }

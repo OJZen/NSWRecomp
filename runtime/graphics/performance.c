@@ -90,7 +90,7 @@ unsigned performance_history(float *interval_ms, float *gpu_ms, unsigned capacit
     return n;
 }
 
-enum { GPU_WINDOW = 2048 };
+enum { GPU_WINDOW = 4096 };
 typedef struct { double start, end; } GpuInterval;
 static GpuInterval gpu_intervals[GPU_WINDOW];
 static unsigned gpu_count, gpu_cursor;

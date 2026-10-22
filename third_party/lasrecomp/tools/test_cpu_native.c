@@ -1,5 +1,6 @@
 // Synthetic exclusive-access checks; no game data or platform services.
 #include "cpu.h"
+#include "simd.h"
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdlib.h>
@@ -12,6 +13,29 @@ void rt_udf(Cpu *c, uint64_t pc) {
     (void)c; (void)pc;
     if (expect_trap) longjmp(trap, 1);
     abort();
+}
+
+int test_host_rounding(void) {
+#if defined(__aarch64__)
+    uint64_t saved = rt_get_fpcr(), status = rt_get_fpsr();
+    int result = 0;
+    const int modes[] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+    for (unsigned controls = 0; controls < 4; controls++) {
+        uint64_t control = (saved & ~(15ull << 22)) | ((uint64_t)controls << 24);
+        for (unsigned i = 0; i < 4; i++) {
+            rt_set_fpcr(control);
+            simd_set_host_round(modes[i]);
+            if (simd_host_round() != modes[i] || fegetround() != modes[i] ||
+                rt_get_fpcr() != (control | ((uint64_t)i << 22))) result = 1;
+            simd_set_host_round(modes[i]); // Setting the existing mode preserves every other control and status bit.
+            if (rt_get_fpcr() != (control | ((uint64_t)i << 22)) || rt_get_fpsr() != status) result = 2;
+        }
+    }
+    rt_set_fpcr(saved); rt_set_fpsr(status);
+    return result;
+#else
+    return 0;
+#endif
 }
 
 int test_scalar_exclusives(void) {

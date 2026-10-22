@@ -1,5 +1,6 @@
-"""Incremental single-compiler build and linkage verification; never executes a guest function."""
+"""Incremental bounded parallel build and linkage verification; never executes a guest function."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import fcntl
 import hashlib
 import json
@@ -14,9 +15,9 @@ import tempfile
 from bounded import run
 from recompile import ROOT, VENDOR, digest, generate, prepare_work, profile
 
-FLAGS = ['-std=gnu11', '-O1', '-g0', '-fPIC', '-fno-strict-aliasing']
+FLAGS = ['-std=gnu11', '-O2', '-g0', '-fPIC', '-fno-strict-aliasing']
 BUILD = ROOT / 'work/build'
-RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h', 'hle.c', 'hle_symbols.inc')
+RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h', 'hle.c', 'hle_symbols.inc', 'game_timing.c', 'game_timing.h')
 
 
 def write_json(path, value):
@@ -94,7 +95,15 @@ def reuse_renamed(name, source, directory, generation, context_sha):
             write_json(output.with_suffix('.json'), record)
 
 
-def batch(name, limit=128):
+def compiler_jobs(requested=None):
+    jobs = int(os.environ.get('TOTK_BUILD_JOBS', min(8, os.cpu_count() or 1))) if requested is None else requested
+    if type(jobs) is not int or not 1 <= jobs <= 32:
+        raise ValueError('compiler jobs must be between 1 and 32')
+    return jobs
+
+
+def batch(name, limit=128, jobs=None):
+    jobs = compiler_jobs(jobs)
     current = json.loads((BUILD / 'context.json').read_text())
     if current != context():
         raise ValueError('compiler or headers changed during build')
@@ -108,17 +117,24 @@ def batch(name, limit=128):
     if any(not re.fullmatch(re.escape(name) + r'_(?:\d{3,}|table)\.c', file) for file in generation['files']):
         raise ValueError('unexpected generated filename')
     reuse_renamed(name, source, directory, generation, context_sha)
-    compiled = remaining = reused = 0
+    pending = []
+    remaining = reused = 0
     for file, sha in generation['files'].items():
         output = directory / Path(file).with_suffix('.o')
         if ready(output, sha, context_sha):
             reused += 1
-        elif compiled < limit:
-            compile_unit(source / file, output, sha, context_sha, current['flags'])
-            compiled += 1
+        elif len(pending) < limit:
+            pending.append((source / file, output, sha, context_sha, current['flags']))
         else:
             remaining += 1
-    result = {'module': name, 'compiled': compiled, 'reused': reused, 'remaining': remaining}
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = [pool.submit(compile_unit, *args) for args in pending]
+        try:
+            for future in as_completed(futures): future.result()
+        except BaseException:
+            for future in futures: future.cancel()
+            raise
+    result = {'module': name, 'compiled': len(pending), 'reused': reused, 'remaining': remaining, 'jobs': jobs}
     write_json(directory / 'batch.json', result)
     return result
 
@@ -143,7 +159,8 @@ def object_list(generations, current):
     return objects
 
 
-def build(exefs):
+def build(exefs, jobs=None):
+    jobs = compiler_jobs(jobs)
     prepare_work()
     BUILD.mkdir(exist_ok=True)
     if BUILD.is_symlink():
@@ -164,8 +181,9 @@ def build(exefs):
         for name in generations:
             index = 0
             while True:
-                metrics.append(run([sys.executable, str(Path(__file__).resolve()), '--worker', name],
-                                   cwd=ROOT, log=ROOT / 'work/logs' / f'build-{name}-{index:03}.log'))
+                metrics.append(run([sys.executable, str(Path(__file__).resolve()), '--worker', name, '--jobs', str(jobs)],
+                                   cwd=ROOT, log=ROOT / 'work/logs' / f'build-{name}-{index:03}.log',
+                                   rss_limit=(1536 if jobs == 1 else 4096) << 20))
                 result = json.loads((BUILD / name / 'batch.json').read_text())
                 print(json.dumps(result), flush=True)
                 if not result['remaining']:
@@ -203,15 +221,16 @@ def build(exefs):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--exefs', type=Path)
+    parser.add_argument('--jobs', type=int, choices=range(1, 33), metavar='1..32', help='compiler concurrency; default up to 8 CPU cores')
     parser.add_argument('--worker', choices=tuple(profile()['modules']), help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
         if args.worker:
-            print(json.dumps(batch(args.worker)))
+            print(json.dumps(batch(args.worker, jobs=args.jobs)))
         else:
             if args.exefs is None:
                 parser.error('--exefs is required')
-            result = build(args.exefs.resolve())
+            result = build(args.exefs.resolve(), jobs=args.jobs)
             print(json.dumps({k: result[k] for k in ('status', 'modules', 'game_executed')}))
             if any(r['unsupported_instructions'] for r in result['generation'].values()):
                 parser.exit(2, 'linkage passed; unsupported guest instructions still remain\n')

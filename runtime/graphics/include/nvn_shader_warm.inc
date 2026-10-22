@@ -94,6 +94,7 @@ static void zelda_shader_warm(void) {
     const pso_skey *recorded = records.bytes;
     NSMutableData *pipeline_data = [NSMutableData data];
     NSMutableArray *descriptors = [NSMutableArray array];
+    NSMutableArray<NSString *> *binary_keys = [NSMutableArray array];
     NSMutableSet<NSData *> *pending_keys = [NSMutableSet set];
     unsigned fetch_pipelines = 0;
     z_warming = 1;
@@ -141,12 +142,31 @@ static void zelda_shader_warm(void) {
         if (!d.vertexFunction || (fs && !d.fragmentFunction)) continue;   // variant library not built
         [pending_keys addObject:identity];
         [pipeline_data appendBytes:&k length:sizeof k]; [descriptors addObject:d];
+        [binary_keys addObject:render_binary_key(&k, vs, fs, 0) ?: @""];
         if (!derived && fetches[i].length) fetch_pipelines++;
         }
     }
     if (!derived) direct_count = descriptors.count;
     }
     z_warming = 0;
+    const char *capture_path = getenv("TOTK_RENDER_CAPTURE");
+    if (capture_path && *capture_path) {
+        NSMutableArray *selected = [NSMutableArray array], *selected_keys = [NSMutableArray array];
+        // shortcut: validate 16 exported layouts first; expand only after offline compilation and strict matching pass.
+        for (NSUInteger i = 0; i < descriptors.count && selected.count < 16; i++) {
+            NSString *key = binary_keys[i];
+            if (!key.length || [selected_keys containsObject:key]) continue;
+            MTLRenderPipelineDescriptor *descriptor = descriptors[i];
+            if (!objc_getAssociatedObject(descriptor.vertexFunction, &z_function_path) ||
+                (descriptor.fragmentFunction && !objc_getAssociatedObject(descriptor.fragmentFunction, &z_function_path))) continue;
+            [selected addObject:descriptor]; [selected_keys addObject:key];
+        }
+        NSError *error = nil;
+        if (!ZELDA_SHADER_BUILD(shader_render_capture(g_dev, selected, selected_keys, g_msl_dir,
+                @ZELDA_PIPELINE_RECIPE_CONTRACT, @(capture_path), &error)))
+            MDIE("Bounded render capture failed: %s", error.localizedDescription.UTF8String);
+        MLOG("RENDER_CAPTURE pipelines=%lu path=%s", (unsigned long)selected.count, capture_path);
+    }
     NSMutableArray<NvShader *> *compute_shaders = [NSMutableArray array];
     for (NSString *key in computes) {
         NvShader *shader = g_shcache[key];
@@ -159,8 +179,8 @@ static void zelda_shader_warm(void) {
     const pso_key *pipeline_keys = pipeline_data.bytes;
     __strong id *built = (__strong id *)calloc(rendered + computed + 1, sizeof(id));
     dispatch_apply(rendered + computed, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) { @autoreleasepool {
-        if (i < rendered) built[i] = ZELDA_SHADER_BUILD([g_dev newRenderPipelineStateWithDescriptor:descriptors[i] error:NULL]);
-        else built[i] = ZELDA_SHADER_BUILD([g_dev newComputePipelineStateWithFunction:compute_shaders[i - rendered]->fn error:NULL]);
+        if (i < rendered) built[i] = ZELDA_SHADER_BUILD(render_from_descriptor(descriptors[i], binary_keys[i], NULL));
+        else built[i] = ZELDA_SHADER_BUILD(compute_from_shader(compute_shaders[i - rendered], NULL));
         shader_status_note(SHADER_STEP, 0);
     } });
     unsigned pipelines = 0, compute = 0, failed = 0, derived_failed = 0;
@@ -177,5 +197,6 @@ static void zelda_shader_warm(void) {
          (unsigned long)(rendered - direct_count), derived_failed, fetch_libraries, compute, failed, malformed, recipes, stale,
          (shaders_done - start) / 1e6, (bp_now() - start) / 1e6);
     shader_ir_report("warm");
+    shader_render_report();
     }
 }

@@ -2,30 +2,46 @@
   "repository": "https://github.com/peiikai/LASRecomp",
   "upstream_branch": "beta_5",
   "upstream_commit": "5c7e49887b2eeed192cb88149ab8b4da383dc096",
-  "local_revision": "d7d3a53d421b1ac8bc75b4129dbdaa0d56c6bf80",
+  "local_revision": "07131228039fb42cb4468b776cf1daa23c91d8de",
   "local_commits": [
     "28b0221",
     "d4eca9f",
     "014f913",
     "9c408ff",
-    "d7d3a53"
+    "d7d3a53",
+    "f8a1c33",
+    "67e80db",
+    "eed8046",
+    "4f80351",
+    "5236c52",
+    "7dcfcb7",
+    "bacb082",
+    "7a4e56b",
+    "0713122"
   ],
   "files": {
     "LICENSE": "31e2e8c10f4461ff75bd2f95e26125f6126ee88828bf29233f4d9f14e90630d6",
     "runtime/cpu.h": "704ad506cd0070314530ad74d2052e76128b0d838fbaed10974d6bcdd87b32f9",
-    "runtime/simd.h": "9d4f8dc4cd7a6951be333c92aba5ebb7b0d5c6cde3092492cf03f59c024e499f",
+    "runtime/simd.h": "e816aabdad17ee01094d08fad0a3985e82b73ad2eb2a112b561e9b36a9dfe50f",
     "runtime/simd_fp.h": "c20e3d16fba1520b5c711ba4f35e0b21399769f8369b6ea7f2b98e7f08c887cd",
     "tools/analyze.py": "6839cbaee754a6c58669c58b77fb0ab543ac2be70ecf0ca32c9adf8f0e6b4283",
-    "tools/gen.py": "dcc4a100146c9b23ddf2a7e2c1d84c21a2b103a2051a7c0dc4d07a89c99088ea",
+    "tools/gen.py": "72cd1c57b02c81756e4f13ef5c56d0c6a403c41aef3c5dc2db9559e7ff69c843",
     "tools/lifter.py": "5ba78a6beda3bb93b5347edc3cd4808da139fe1d0b7a76043167fea5b4499a85",
     "tools/nso.py": "d10050b4f71f7cc0c5a574855d2ceda4dde5afc668836ee2662118d2c8417e74",
     "tools/simd_c.py": "f251a8570f425e829856ebe3552822bd5c8cc8e33ee91dec00eecb1c6825be93",
-    "tools/test_gen_generic.py": "b70780326f2adf3d0a3e36324bf0f8cb2a1e5f3244b36ba1b315da765996cfe2",
+    "tools/test_gen_generic.py": "99385a33bab49ad848ad3dd90af10edb3f0229e60dd93f3842693a999f6c1122",
     "tools/test_nso.py": "0993180e2bb3ed7863931818bda96ba2b864c45716c3441855e522809bd7dc2a",
-    "tools/test_cpu_native.c": "c562018d0b17201e0c389d8ab1822c2fcc5e1467d6cd7a07836e301fe7eaeec6",
-    "tools/test_cpu_semantics.py": "b2a15cc4f9914a4ca51207d08ba0a917bd5d1ed540f28e5b34843ceb04919265",
-    "tools/test_fpsr.py": "c670837ac8b93870e0613f4827c973c79a01d14d67b5776a31113ebb3840a44d",
+    "tools/test_cpu_native.c": "e47a5aeaabc186c695caacf9c2265479a572e4ed4d462bcfe2ccd873eeb072c2",
+    "tools/test_cpu_semantics.py": "c5475135adc65be0e7b2a0820ef9532bf7275a3111db20dc9a4d7ff3b40ca140",
+    "tools/test_fpsr.py": "245707c9c4aa82089a71c8b49960fd6a0da0bf619c98bd44a964a1076d7b077f",
     "tools/test_jump_tables.py": "719e4e4a6617c3f4d8d84255ba21c2f19ee818704a311fffa8d277f965d9a788",
-    "tools/test_state_tables.py": "121886294a2316e680e1e3d18453a7822f72539fd6df2c02d8e96e9a8630bbe2"
+    "tools/test_state_tables.py": "1953daa7d49012a5c8c79186875b7779cc1b84a5f53ec4e489e43b9016bdf9d9"
+  },
+  "runtime_reference": {
+    "file": "runtime/dispatch.c",
+    "revision": "eed804640fd228c1f07a4d42a0b2c6a2fe950c62",
+    "sha256": "be737629608cc9f7a11114a1233c1e7600b023d51240dc300f073b87139076ac",
+    "adapted_as": "runtime/probe.c",
+    "scope": "thread-local cache of immutable compiled functions; dynamic external bindings are not cached"
   }
 }

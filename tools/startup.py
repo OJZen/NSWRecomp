@@ -118,7 +118,11 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30):
     del modules, n
     environment = dict(os.environ)
     environment['TOTK_RUN_SECONDS'] = str(seconds)
-    environment.update(DM_NVN_TBDR='0', DM_PSO_MANIFEST='off', DM_PRESENT_LINK='0', DM_MEM_CAP_GB='4',
+    environment.setdefault('DM_NVN_TBDR', '0')
+    environment.setdefault('ZELDA_FS_COMPUTE', '1')
+    environment.setdefault('ZELDA_SUBMIT_FIRST', '6')
+    environment.setdefault('ZELDA_SUBMIT_SECOND', '16')
+    environment.update(DM_PSO_MANIFEST='off', DM_PRESENT_LINK='0', DM_MEM_CAP_GB='4',
                        DM_NVN_SHMAP=str(ROOT / 'work/shaders/shader_map.tsv'),
                        DM_MSL_DIR=str(ROOT / 'work/shaders'), DM_PSO_USER=str(ROOT / 'work/shaders/pso_user.tsv'))
     resource = verify_romfs(romfs) if romfs else None
@@ -175,6 +179,8 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30):
             graphics_flags = ['-DTOTK_GRAPHICS', *link_flags()]
         with tempfile.TemporaryDirectory(prefix='startup-', dir=ROOT / 'work/tmp') as temp:
             temp = Path(temp)
+            if graphics:
+                graphics_flags += ['-Xlinker', '-object_path_lto', '-Xlinker', str(temp / 'lto')]
             candidate = temp / 'probe'
             response = temp / 'link.rsp'
             command = [*FLAGS, '-DTOTK_LINK_ALL', '-DTOTK_STARTUP', '-I', str(VENDOR / 'runtime'),

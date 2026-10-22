@@ -23,6 +23,13 @@ class ControlPanelTests(unittest.TestCase):
     def test_frame_statistics_and_gpu_interval_union(self):
         self.compile_run(['runtime/graphics/performance.c', 'tests/native_performance.c'])
 
+    def test_frame_targets_and_elapsed_time_do_not_speed_up(self):
+        self.compile_run(['runtime/game_timing.c', 'tests/native_game_timing.c'])
+
+    def test_frame_rate_and_sound_persistence_and_session_overrides(self):
+        self.compile_run(['runtime/game_timing.c', 'runtime/graphics/performance.c', 'tests/native_fps_panel.m'],
+                         ['-fobjc-arc', '-framework', 'Cocoa', '-framework', 'QuartzCore'])
+
     def test_extended_controller_mapping_focus_and_disconnect(self):
         self.compile_run(['runtime/graphics/input.c', 'tests/native_gamepad.m'],
                          ['-fobjc-arc', '-framework', 'Foundation', '-framework', 'GameController'])

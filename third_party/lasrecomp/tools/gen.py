@@ -6,6 +6,7 @@ Usage: gen.py <name> <nso> <base> <outdir> [--hle hle_symbols.txt] [--chunk N] [
 """
 import argparse
 import bisect
+import json
 import os
 import platform
 import re
@@ -66,6 +67,33 @@ class Module:
 
     def in_text(self, a):
         return self.lo <= a < self.hi and a % 4 == 0
+
+    def load_hooks(self, path):
+        """Load checked, module-relative instruction hooks without game-specific imports."""
+        with open(path) as source:
+            config = json.load(source)
+        if not isinstance(config, dict) or set(config) != {'schema', 'hooks'} or type(config['schema']) is not int or config['schema'] != 1 or not isinstance(config['hooks'], list):
+            raise ValueError('hooks: expected schema 1 and a hooks array')
+        hooks = {}
+        def number(value):
+            if not isinstance(value, str) or not re.fullmatch(r'0x[0-9a-fA-F]+', value):
+                raise ValueError('hooks: offsets and instruction words must be hexadecimal strings')
+            return int(value, 16)
+        for record in config['hooks']:
+            if not isinstance(record, dict) or set(record) != {'offset', 'expected', 'targets'} or not isinstance(record['targets'], list):
+                raise ValueError('hooks: expected offset, expected and targets')
+            site = self.base + number(record['offset'])
+            word = number(record['expected'])
+            targets = [self.base + number(t) for t in record['targets']]
+            if not self.in_text(site) or word > 0xffffffff or self.word(site) != word:
+                raise ValueError(f'hook {site:#x}: invalid site or instruction mismatch')
+            if site in hooks or site in self.hooks or site in self.patches or site - self.base in self.rando_code:
+                raise ValueError(f'hook {site:#x}: duplicate or overlapping patch')
+            if len(set(targets)) != len(targets) or any(not self.in_text(t) for t in targets):
+                raise ValueError(f'hook {site:#x}: invalid jump targets')
+            hooks[site] = (word, targets, 'configured hook')
+        self.hooks = {**self.hooks, **hooks}
+        return hooks
 
     def word(self, a):
         return self.words[(a - self.lo) // 4]
@@ -198,13 +226,14 @@ class Module:
                 return None
         return None
 
-    def _state_table(self, br_pc, entry):
+    def _state_table(self, br_pc, entry, preceding_tables=None):
         """Resolve a readonly relative table from constants, guard or original function bounds."""
-        if not self.computed_target(br_pc, entry):
-            return None
+        if preceding_tables is None: preceding_tables = {}
         bounds = self._original_bounds(br_pc)
         if bounds is None: return None
         low, high = bounds
+        if not self.computed_target(br_pc, low):
+            return None
         start = max(low, br_pc - 4 * 64)
         instructions = list(self.table_disasm.disasm(bytes(self.nso.image[start - self.base:br_pc - self.base]), start))
         if len(instructions) * 4 != br_pc - start:
@@ -297,6 +326,15 @@ class Module:
                 if instruction.group(capstone.CS_GRP_JUMP) and instruction.operands[-1].type == C.ARM64_OP_IMM:
                     target = positions.get(instruction.operands[-1].imm)
                     if target is not None: predecessors[target].add(i)
+                elif self.lift(instruction.address).kind == 'br' and self.computed_target(instruction.address, low):
+                    # A nested table can be reached through an earlier table's cases.
+                    if instruction.address not in preceding_tables:
+                        if len(preceding_tables) >= 64: return None
+                        preceding_tables[instruction.address] = None
+                        preceding_tables[instruction.address] = self._state_table(instruction.address, low, preceding_tables)
+                    for address in preceding_tables[instruction.address] or ():
+                        target = positions.get(address)
+                        if target is not None: predecessors[target].add(i)
             successors = [set() for _ in mask_instructions]
             for at, incoming in enumerate(predecessors):
                 for previous in incoming: successors[previous].add(at)
@@ -308,6 +346,7 @@ class Module:
                 pending.extend(successors[at] - reachable)
             for incoming in predecessors: incoming.intersection_update(reachable)
             def reaching_definitions(before, register=indexed):
+                if register is None: return None
                 pending, seen, definitions = [before], set(), set()
                 if before not in reachable: return None
                 while pending:
@@ -317,7 +356,7 @@ class Module:
                     if not predecessors[at]: return None
                     for previous in predecessors[at]:
                         instruction = mask_instructions[previous]
-                        if instruction.group(capstone.CS_GRP_CALL): return None
+                        if instruction.group(capstone.CS_GRP_CALL) and not 19 <= register <= 29: return None
                         if register in (reg(r) for r in self._register_access(instruction)[1]): definitions.add(previous)
                         else: pending.append(previous)
                 return definitions or None
@@ -414,6 +453,14 @@ class Module:
                 self.stats['masked_tables'] += 1
                 return targets
 
+        def byte_targets():
+            # A byte offset has only 256 outcomes even when its index is not bounded.
+            if width != 1 or not tables: return None
+            targets = {case_base + (value << operands[2].shift.value) for value in range(256)}
+            if any(not self.in_text(target) for target in targets): return None
+            self.stats['byte_domain_tables'] += 1
+            return sorted(targets)
+
         def state_targets():
             if not tables: return None
             targets = set()
@@ -427,8 +474,8 @@ class Module:
                     if not low <= target < high or not self.in_text(target): break
                     if state_indices is None or i in state_indices: candidates.add(target)
                 else:
-                    return None
-                if len(candidates) < 2: return None
+                    return byte_targets()
+                if len(candidates) < 2: return byte_targets()
                 targets.update(candidates)
             self.stats['state_tables'] += 1
             return sorted(targets)
@@ -438,18 +485,24 @@ class Module:
             guard_word = self.word(instructions[guard_at].address)
             condition = bits(guard_word, 0, 4)
             destination = instructions[guard_at].address + sext(bits(guard_word, 5, 19), 19) * 4
-            if (condition not in (2, 8) or guard_at >= load_at or
-                    instructions[guard_at].address < destination <= br_pc or
+            destination_at = (destination - start) // 4
+            taken = (condition in (3, 9) and block_start <= destination_at <= load_at and
+                     destination > instructions[guard_at].address and
+                     all(i.id == C.ARM64_INS_NOP for i in instructions[block_start:destination_at]))
+            path_start = (destination - start) // 4 if taken else guard_at + 1
+            if (guard_at >= load_at or (not taken and (condition not in (2, 8) or
+                    instructions[guard_at].address < destination <= br_pc)) or
                     any(i.group(capstone.CS_GRP_JUMP) or i.group(capstone.CS_GRP_CALL) or i.group(capstone.CS_GRP_RET)
-                        for i in instructions[guard_at + 1:])):
-                return None
+                        for i in instructions[path_start:])):
+                return byte_targets()
             comparison = self._guard_comparison(instructions[guard_at].address, start)
-            if comparison is None: return None
+            if comparison is None: return byte_targets()
             compare_pc, compared, count = comparison
             compare_at = (compare_pc - start) // 4
             indexed = reg(memory.mem.index)
             if indexed is None: return None
             required_mask = (1 << (count - 1).bit_length()) - 1
+            path = list(range(compare_at + 1, guard_at + 1)) + list(range(path_start, load_at))
 
             def copy_source(at):
                 copy = instructions[at]
@@ -474,8 +527,8 @@ class Module:
             before, value = load_at, indexed
             resolved = False
             while value is not None:
-                writes = [i for i in range(compare_at + 1, before)
-                          if value in (reg(r) for r in self._register_access(instructions[i])[1])]
+                writes = [i for i in path if i < before and
+                          value in (reg(r) for r in self._register_access(instructions[i])[1])]
                 if not writes:
                     resolved = saved_alias(value, set())
                     break
@@ -483,9 +536,9 @@ class Module:
                 value = copy_source(before)
             if not resolved:
                 if indexed != compared and not any(indexed in (reg(r) for r in self._register_access(i)[1])
-                                                   for i in instructions[compare_at + 1:load_at]):
+                                                   for i in (instructions[at] for at in path)):
                     return state_targets()
-                return None
+                return byte_targets()
             if not tables:
                 if br_pc - low > 4 * 4096: return None
                 return self._emulate_table(br_pc, low, high, load.address, reg(memory.mem.index), count,
@@ -705,7 +758,7 @@ class Module:
         """True if the br register comes from address arithmetic (a table) rather than a load."""
         rn = bits(self.word(br_pc), 5, 5)
         a = br_pc - 4
-        while a >= entry and br_pc - a <= 4 * 16:
+        while a >= entry and br_pc - a <= 4 * 64:
             w = self.word(a)
             if self.lift(a).kind not in ('op', 'asm'):
                 return False
@@ -956,6 +1009,7 @@ def main():
     ap.add_argument('base', type=lambda s: int(s, 0))
     ap.add_argument('outdir')
     ap.add_argument('--hle')
+    ap.add_argument('--hooks', help='schema-1 JSON of module-relative instruction hooks')
     ap.add_argument('--no-game-patches', action='store_true',
                     help='disable Link\'s Awakening patches, hooks and randomizer variants')
     ap.add_argument('--cache-limit', type=int, default=0,
@@ -972,6 +1026,7 @@ def main():
         ap.error('--cache-limit must be nonnegative')
     t0 = time.time()
     m = Module(args.name, args.nso, args.base, args.simd, not args.no_game_patches, args.cache_limit)
+    configured_hooks = m.load_hooks(args.hooks) if args.hooks else {}
     starts = m.boundaries()
     hle = {}
     if args.hle and os.path.exists(args.hle):
@@ -1032,6 +1087,14 @@ def main():
         entries[a] = (end, labels, tables)
     print(f'{args.name}: {len(starts)} boundaries, {len(entries)} functions, {rounds} rounds, {dict(m.stats)}, '
           f'{time.time() - t0:.0f}s', file=sys.stderr)
+
+    for site, (_, targets, _) in configured_hooks.items():
+        index = bisect.bisect_right(order, site) - 1
+        if index < 0 or order[index] in hle:
+            raise ValueError(f'hook {site:#x}: no generated function or overridden by HLE')
+        start = order[index]
+        if any(not start <= target < entries[start][0] for target in targets):
+            raise ValueError(f'hook {site:#x}: target outside its generated function')
 
     os.makedirs(args.outdir, exist_ok=True)
     order = sorted(entries)

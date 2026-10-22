@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,22 @@ from recompile import digest
 
 
 class BuildTests(unittest.TestCase):
+    def test_concurrency_and_configuration(self):
+        barrier = threading.Barrier(2)
+        original = build.compile_unit
+        def concurrent(*args):
+            barrier.wait(timeout=10)
+            return original(*args)
+        with patch.object(build, 'compile_unit', side_effect=concurrent):
+            result = build.batch('sample', jobs=2)
+        self.assertEqual((result['jobs'], result['compiled']), (2, 2))
+        self.assertEqual(len(build.object_list({'sample': self.generation}, self.context)), 2)
+        with patch.dict(build.os.environ, {'TOTK_BUILD_JOBS': '3'}):
+            self.assertEqual(build.compiler_jobs(), 3)
+            self.assertEqual(build.compiler_jobs(1), 1)
+        for value in (0, 33, True):
+            with self.assertRaises(ValueError): build.compiler_jobs(value)
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='build-test-')
         self.addCleanup(temp.cleanup)
