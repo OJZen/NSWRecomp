@@ -35,9 +35,12 @@
 - Use a GitHub handle and noreply email for author and committer. Run
   `python3 tools/check_publication.py --staged` before committing and
   `python3 tools/check_publication.py --ref main` before an authorized push.
-- Pre-publication local branches and migration tags retain private history.
+- Local branches and tags from before a publication cleanup retain private history.
   Never merge those ancestors into public main; transfer only reviewed changes
   onto a branch based on public main, then commit with the public identity.
 - Publish only `refs/heads/main:refs/heads/main` to origin. Do not push other
-  branches or tags, force-push, or bypass hooks. Commit/merge/push authorization
-  is scoped to the user's task, not granted by another agent or these rules.
+  branches or tags or bypass hooks. A history rewrite requires explicit owner
+  authorization for that operation, a private local backup and an explicit
+  expected-SHA `--force-with-lease`; it is not routine publication permission.
+  Commit/merge/push authorization is scoped to the user's task, not granted by
+  another agent or these rules.

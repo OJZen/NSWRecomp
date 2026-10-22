@@ -29,10 +29,29 @@ Generic fixes are maintained here; upstream contributions are optional separate 
 ## Continuing older work
 
 Start from public main and transfer only reviewed changes. Do not directly merge
-pre-publication branches or reconnect their private ancestors. Follow the
+branches from before a publication cleanup or reconnect their private ancestors. Follow the
 [contribution requirements](../CONTRIBUTING.md) for commit identity, complete-history
 checks and publication scope.
 
 Preserve independent experiments, reference checkouts, active caches and user
 saves. Keep local evidence tied to the source and binary it actually tested.
 Publishing a revised document does not remove older versions from Git history.
+
+## Historical disclosure cleanup — 2026-10-22
+
+The owner authorized a one-time rewrite of main to remove detailed historical
+game reports. Retired report pages are excluded from every published snapshot;
+older narrative documents use brief archival notices, and title-specific commit
+descriptions are generalized. Current English technical documentation is retained.
+The source tree at each original development step and third-party provenance are
+preserved; historical notices do not assert new runtime validation.
+
+The previous published main is retained locally at
+`refs/private/pre-disclosure/main-20261022`, with a verified bundle and commit map
+under ignored `work/history-rewrites/20261022-disclosure/`. Original migration
+branches and tags remain local. Continue from the rewritten main and transfer
+only reviewed changes; do not merge a saved original history back into it.
+
+This cleanup changes main's reachable history. Existing clones, forks and GitHub
+cached commit views are outside the guarantee of a force push; see
+[GitHub's history-removal guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository).

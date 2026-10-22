@@ -60,7 +60,7 @@ finishing an implementation does not independently authorize publication.
    by its documentation. Recheck affected behavior after resolving conflicts.
 3. Review experiments separately. A directory move, cleanup or passing test does
    not by itself justify merging an experiment.
-4. **Local branches and migration tags from before initial publication retain
+4. **Local branches and tags from before a publication cleanup retain
    private history and must not be merged directly into public `main`.** Start
    from public `main` and transfer only reviewed changes, for example with
    `git cherry-pick --no-commit <reviewed-commit>`, then review and commit with
@@ -102,10 +102,17 @@ git -c push.followTags=false push origin refs/heads/main:refs/heads/main
 git ls-remote --heads --tags origin
 ```
 
-Do not use `--all`, `--mirror`, `--tags`, force pushes, `--no-verify` or disabled
+Do not use `--all`, `--mirror`, `--tags`, `--no-verify` or disabled
 hooks to bypass these rules. Fetch and inspect a divergent remote history instead
 of overwriting it. Verify the remote main SHA and the absence of unintended refs
 following publication.
+
+History rewrites require explicit owner authorization for the specific operation.
+Keep the original main in a private local ref and a verified bundle, review the
+complete replacement history, and use `--force-with-lease` bound to the exact
+previous remote main SHA. Stop if the lease no longer matches. Publish only main;
+never include backup refs, other branches or tags. A prior rewrite authorization
+does not authorize a later force push.
 
 These hooks are local safeguards, not GitHub branch protection. Server-enforced
 review rules require separate configuration. A documentation edit also does not
