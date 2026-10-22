@@ -1,5 +1,9 @@
 # Third-party sources
 
+NSWRecomp preserves the source history and notices imported from totk-recomp.
+The LASRecomp-derived subset is now maintained in this repository; its manifest
+separates upstream origin revisions from recorded local changes.
+
 `third_party/lasrecomp/` is a source-only subset of
 [LASRecomp](https://github.com/peiikai/LASRecomp), copyright 2026 Peiikai, MIT.
 The original notice is retained in `third_party/lasrecomp/LICENSE`.

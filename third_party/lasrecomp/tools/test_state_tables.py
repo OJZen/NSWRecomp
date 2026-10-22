@@ -80,7 +80,8 @@ void rt_udf(Cpu *c, uint64_t p) { (void)c; (void)p; abort(); }
 uint64_t rt_ticks(void) { abort(); }
 ''' + f'void f_{base + 0x80:x}(Cpu *c);\n'
                         + f'uint64_t run(uint64_t index, uint64_t guard) {{ Cpu c = {{0}}; c.x[4] = guard; c.x[5] = index; c.x[6] = 1; f_{base + 0x80:x}(&c); return c.x[0]; }}\n')
-                    library = directory / 'synthetic.so'
+                    # dlopen caches paths; each variant has different generated guest addresses.
+                    library = directory / f'{variant}.so'
                     subprocess.run(['clang', '-shared', '-fPIC', '-O2', '-I', str(ROOT / 'runtime'),
                                     *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
                                    check=True, timeout=30, capture_output=True)

@@ -35,7 +35,7 @@
     "tools/test_cpu_semantics.py": "c5475135adc65be0e7b2a0820ef9532bf7275a3111db20dc9a4d7ff3b40ca140",
     "tools/test_fpsr.py": "245707c9c4aa82089a71c8b49960fd6a0da0bf619c98bd44a964a1076d7b077f",
     "tools/test_jump_tables.py": "719e4e4a6617c3f4d8d84255ba21c2f19ee818704a311fffa8d277f965d9a788",
-    "tools/test_state_tables.py": "1953daa7d49012a5c8c79186875b7779cc1b84a5f53ec4e489e43b9016bdf9d9"
+    "tools/test_state_tables.py": "0ef3e04782d7ac6db036a6f40ac37d7ed74d415adb0c831b33f19e4da0669efd"
   },
   "runtime_reference": {
     "file": "runtime/dispatch.c",
@@ -43,5 +43,9 @@
     "sha256": "be737629608cc9f7a11114a1233c1e7600b023d51240dc300f073b87139076ac",
     "adapted_as": "runtime/probe.c",
     "scope": "thread-local cache of immutable compiled functions; dynamic external bindings are not cached"
+  },
+  "maintenance": "NSWRecomp maintains this derived subset locally; upstream revisions describe its origin.",
+  "local_changes": {
+    "tools/test_state_tables.py": "Use a distinct shared-library path for each synthetic byte-table variant so dlopen cannot reuse an earlier variant."
   }
 }
