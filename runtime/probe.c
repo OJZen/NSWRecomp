@@ -7,18 +7,31 @@
 #include "load.h"
 #endif
 
+#ifdef NSW_MODULE_TABLES
+#define RT_MODULE(name) extern const uint64_t name##_fn_addrs[], name##_fn_count; \
+    extern const GuestFn name##_fn_ptrs[];
+#include "module_tables.inc"
+#undef RT_MODULE
+#else
 extern const uint64_t rtld_fn_addrs[], rtld_fn_count;
 extern const GuestFn rtld_fn_ptrs[];
 #ifdef TOTK_LINK_ALL
 extern const uint64_t main_fn_addrs[], main_fn_count, subsdk0_fn_addrs[], subsdk0_fn_count, sdk_fn_addrs[], sdk_fn_count;
 extern const GuestFn main_fn_ptrs[], subsdk0_fn_ptrs[], sdk_fn_ptrs[];
 #endif
+#endif
 static const struct { const char *name; const uint64_t *addresses, *count; const GuestFn *functions; } tables[] = {
+#ifdef NSW_MODULE_TABLES
+#define RT_MODULE(name) {#name, name##_fn_addrs, &name##_fn_count, name##_fn_ptrs},
+#include "module_tables.inc"
+#undef RT_MODULE
+#else
     {"rtld", rtld_fn_addrs, &rtld_fn_count, rtld_fn_ptrs},
 #ifdef TOTK_LINK_ALL
     {"main", main_fn_addrs, &main_fn_count, main_fn_ptrs},
     {"subsdk0", subsdk0_fn_addrs, &subsdk0_fn_count, subsdk0_fn_ptrs},
     {"sdk", sdk_fn_addrs, &sdk_fn_count, sdk_fn_ptrs},
+#endif
 #endif
 };
 volatile int g_fnprof = 0;
@@ -88,6 +101,7 @@ int rt_validate_tables(void) {
 }
 
 #if defined(TOTK_LINK_ALL) && !defined(TOTK_STARTUP)
+#include "utf8_main.h"
 static int has_function(uint64_t address) { return rt_find_function(address) != NULL; }
 int main(int argc, char **argv) {
     int valid = rt_validate_tables();

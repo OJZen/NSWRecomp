@@ -1,14 +1,13 @@
 """Prepare a version-locked local game from user-supplied solid NSZ packages and keys."""
 import argparse
-import fcntl
 import json
 from pathlib import Path
 import stat
 import tempfile
-import resource
 import signal
 
 from build import write_json
+from host import disable_core_dumps, lock_file
 from extract_exefs import extract as extract_exefs
 from extract_romfs import extract as extract_romfs, inspect_package, read_keys
 from recompile import ROOT, digest, prepare_work, profile, verify
@@ -41,14 +40,14 @@ def activate(output):
 
 
 def import_game(base, update, keys):
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    disable_core_dumps()
     prepare_work()
     local = ROOT / 'local'
     if local.is_symlink(): raise ValueError('local must not be a symlink')
     local.mkdir(exist_ok=True)
     if (local / 'import.lock').is_symlink(): raise ValueError('import lock must not be a symlink')
     with (local / 'import.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file(lock)
         sources = {'base': identity(base), 'update': identity(update)}
         identity(keys)
         # Check both headers without printing or retaining key contents.

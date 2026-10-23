@@ -1,4 +1,6 @@
 from pathlib import Path
+import mmap
+import os
 import struct
 import subprocess
 import sys
@@ -14,7 +16,7 @@ from recompile import Nso
 BASE = 0x7200000000
 
 
-def fixture(path, *, main=True, shared=False):
+def fixture(path, *, main=True, shared=False, exports=()):
     text, ro, data = bytearray(0x1000), bytearray(0x1000), bytearray(0x1000)
     ro_at, data_at = 0x4000, 0x5000 if shared else 0x8000
     struct.pack_into('<I', text, 4, 0x40)
@@ -26,6 +28,7 @@ def fixture(path, *, main=True, shared=False):
                     (b'absolute', 0x11, 0, 0xfff1, 0x1234, 8), (b'nnMain', 0x12, 0, 1, 0x80, 4)]
     else:
         symbols += [(b'external', 0x12, 0, 1, 0x80, 4)]
+    symbols += [(name.encode(), 0x12, 0, 1, 0x80, 4) for name in exports]
     strings = bytearray()
     for i, (name, info, other, section, value, size) in enumerate(symbols):
         struct.pack_into('<IBBHQQ', ro, 0x200 + i * 24, len(strings), info, other, section, value, size)
@@ -61,6 +64,7 @@ class LoadTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         cls.native = Path(cls.temp.name) / 'native-load'
         subprocess.run(['clang', '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
+                        *(['-municode'] if os.name == 'nt' else []),
                         '-I', str(ROOT / 'runtime'), str(ROOT / 'runtime/load.c'),
                         str(ROOT / 'tests/native_load.c'), '-o', str(cls.native)], check=True, timeout=30)
 
@@ -105,14 +109,21 @@ class LoadTests(unittest.TestCase):
             r = self.native_run(mode)
             self.assertEqual(r.returncode, 0, f'mode={mode}: {r.stderr}')
         self.assertNotEqual(self.native_run(1).returncode, 0)
+        if os.name == 'nt':
+            self.assertEqual(self.native_run(4).returncode, 73, 'read-only guest text must fault on write')
 
     def test_shared_host_page_is_reported(self):
         self.modules[0] = fixture(self.root / 'main', shared=True)
         load.write_plan(self.plan, self.modules)
         r = self.native_run()
         self.assertEqual(r.returncode, 0, r.stderr)
-        import os
-        self.assertEqual(int(r.stdout), int(os.sysconf('SC_PAGESIZE') > 4096))
+        self.assertEqual(int(r.stdout), int(mmap.PAGESIZE > 4096))
+
+    def test_unicode_plan_path(self):
+        self.plan = self.root / 'plan-\u6d4b\u8bd5.bin'
+        load.write_plan(self.plan, self.modules)
+        result = self.native_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_corrupt_truncated_duplicate_and_out_of_bounds_plans(self):
         load.write_plan(self.plan, self.modules)

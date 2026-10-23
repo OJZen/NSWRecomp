@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -9,12 +10,14 @@ import sys
 import tempfile
 
 from bounded import run
+from host import cpu_flags, library_suffix, response_args, response_command
 
 ROOT = Path(__file__).resolve().parents[1]
 VENDOR = ROOT / 'third_party/lasrecomp'
-PROFILE = ROOT / 'config/totk-1.4.3.json'
+PROFILE = Path(os.environ.get('NSWRECOMP_PROFILE', ROOT / 'config/totk-1.4.3.json')).resolve()
 HOOKS = ROOT / 'config/totk-1.4.3-hooks.json'
 HLE_SYMBOLS = ROOT / 'runtime/hle_symbols.inc'
+WINDOWS_HLE_SYMBOLS = ROOT / 'runtime/hle_windows_symbols.inc'
 sys.path.insert(0, str(VENDOR / 'tools'))
 from analyze import eh_frame_functions
 from nso import Nso
@@ -26,7 +29,21 @@ def digest(path):
 
 
 def profile():
-    return json.loads(PROFILE.read_text())
+    value = json.loads(PROFILE.read_text())
+    modules = value['modules']
+    if (not 1 <= len(modules) <= 13 or
+            any(not re.fullmatch(r'rtld|main|sdk|subsdk[0-9]', name) for name in modules)):
+        raise ValueError('profile must specify 1..13 supported NSO module names')
+    return value
+
+
+def hooks():
+    # An experimental local profile must opt in to its own hooks. Never apply
+    # the default adapter's addresses to a different executable.
+    if PROFILE == ROOT / 'config/totk-1.4.3.json':
+        return HOOKS
+    path = profile().get('hooks')
+    return (PROFILE.parent / path).resolve() if path else None
 
 
 def verify(exefs):
@@ -34,7 +51,7 @@ def verify(exefs):
     for name, info in modules.items():
         path = exefs / name
         if not path.is_file() or path.stat().st_size > 64 << 20 or digest(path) != info['sha256']:
-            raise ValueError(f'{name}: expected the unmodified v1.4.3 NSO; input rejected')
+            raise ValueError(f'{name}: expected the unmodified v{profile()["version"]} NSO; input rejected')
     return modules
 
 
@@ -72,12 +89,16 @@ def generation_inputs(info):
     return {'schema': 1, 'module': info, 'simd': 'c', 'game_patches': False,
             'generator': {p.name: digest(p) for p in sources}, 'profile': digest(PROFILE),
             'hle_symbols': digest(HLE_SYMBOLS),
-            'hooks': digest(HOOKS) if info == profile()['modules']['main'] else None}
+            **({'windows_hle_symbols': digest(WINDOWS_HLE_SYMBOLS)} if os.name == 'nt' else {}),
+            'hooks': digest(hooks()) if hooks() and info == profile()['modules'].get('main') else None}
 
 
 def hle_symbols():
     names = []
-    for line in HLE_SYMBOLS.read_text().splitlines():
+    text = HLE_SYMBOLS.read_text()
+    if os.name == 'nt':
+        text += '\n' + WINDOWS_HLE_SYMBOLS.read_text()
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith('//'):
             continue
@@ -129,7 +150,7 @@ def generate(exefs, name):
         metrics = run([sys.executable, str(VENDOR / 'tools/gen.py'), name, str(exefs / name),
                        info['base'], str(staged), '--simd', 'c', '--no-game-patches',
                        '--cache-limit', '32768', '--chunk-bytes', '500000', '--hle', str(bindings),
-                       *(['--hooks', str(HOOKS)] if name == 'main' else [])], cwd=ROOT, log=log)
+                       *(['--hooks', str(hooks())] if name == 'main' and hooks() else [])], cwd=ROOT, log=log)
         files = {p.name: digest(p) for p in sorted(staged.glob('*.c'))}
         result = {'inputs': inputs, 'files': files,
                   'generated_bytes': sum(p.stat().st_size for p in staged.glob('*.c')),
@@ -150,8 +171,11 @@ def generate(exefs, name):
 def check_c(exefs, name):
     generation = generate(exefs, name)
     sources = sorted((ROOT / 'work/generated' / name).glob('*.c'))
-    metrics = run(['clang', '-std=gnu11', '-fsyntax-only', '-I', str(VENDOR / 'runtime'),
-                   *map(str, sources)], cwd=ROOT, log=ROOT / 'work/logs' / f'check-c-{name}.log')
+    with tempfile.TemporaryDirectory(prefix='check-c-') as temp:
+        response = Path(temp) / 'syntax.rsp'
+        response.write_text(response_args(['-std=gnu11', *cpu_flags(), '-fsyntax-only',
+                                          '-I', str(VENDOR / 'runtime'), *map(str, sources)]), encoding='utf-8')
+        metrics = run(response_command(response), cwd=ROOT, log=ROOT / 'work/logs' / f'check-c-{name}.log')
     result = {'module': name, 'translation_units': len(sources), 'status': 'syntax_checked',
               'unsupported_instructions': generation['unsupported_instructions'],
               'generated_files': generation['files'],
@@ -164,11 +188,11 @@ def check_c(exefs, name):
 def probe(exefs):
     generation = generate(exefs, 'rtld')
     output = ROOT / 'work/probe'
-    library = output / ('rtld.dylib' if sys.platform == 'darwin' else 'rtld.so')
+    library = output / ('rtld' + library_suffix())
     sources = sorted((ROOT / 'work/generated/rtld').glob('*.c'))
     with tempfile.TemporaryDirectory(prefix='probe-') as temp:
         candidate = Path(temp) / library.name
-        build = run(['clang', '-std=gnu11', '-O2', '-fPIC', '-shared', '-I', str(VENDOR / 'runtime'),
+        build = run(['clang', '-std=gnu11', '-O2', '-fPIC', '-shared', *cpu_flags(), '-I', str(VENDOR / 'runtime'),
                      *map(str, sources), str(ROOT / 'runtime/probe.c'), str(ROOT / 'runtime/hle.c'), '-lm', '-o', str(candidate)],
                     cwd=ROOT, log=ROOT / 'work/logs/probe-build.log', seconds=120)
         result_path = Path(temp) / 'result.json'

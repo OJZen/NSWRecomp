@@ -1,4 +1,4 @@
-"""Compare four hash-locked recompiled routines with Unicorn and independent byte results."""
+"""Compare configured hash-locked memory/string routines with Unicorn and independent results."""
 import argparse
 from collections import Counter
 import ctypes
@@ -14,6 +14,12 @@ from recompile import Nso, profile, verify
 def probe(exefs, library):
     info = verify(exefs)['rtld']
     n, base = Nso(exefs / 'rtld'), int(info['base'], 0)
+    functions = profile()['rtld_probe_functions']
+    if not functions or not functions.keys() <= {'memset', 'strlen', 'memmove', 'strcmp'}:
+        raise ValueError('configure one or more supported rtld probe functions')
+    if any(int(offset, 0) % 4 or not n.text[0] <= int(offset, 0) < sum(n.text)
+           for offset in functions.values()):
+        raise ValueError('rtld probe function must be an aligned text address')
     lib = ctypes.CDLL(str(library))
     lib.probe_cpu_size.restype = ctypes.c_size_t
     if lib.probe_cpu_size() != 1024:
@@ -34,7 +40,9 @@ def probe(exefs, library):
     counts = Counter()
 
     def check(kind, args, before, after, answer):
-        offset = int(profile()['rtld_probe_functions'][kind], 0)
+        if kind not in functions:
+            return
+        offset = int(functions[kind], 0)
         function = getattr(lib, f'f_{base + offset:x}')
         function.argtypes, function.restype = [ctypes.c_void_p], None
         ctypes.memset(ctypes.addressof(state), 0, ctypes.sizeof(state))
@@ -93,7 +101,8 @@ def probe(exefs, library):
                     answer = (before[start + change] - before[other + change]) & 0xffffffff
                 check('strcmp', (address + start, address + other), before, before, answer)
     return {'status': 'passed', 'cases': dict(counts), 'total': sum(counts.values()),
-            'scope': 'four rtld routines; registers, NZCV, return values and all buffer guard bytes',
+            'functions': functions,
+            'scope': 'configured rtld routines; registers, NZCV, return values and all buffer guard bytes',
             'game_boot_tested': False}
 
 

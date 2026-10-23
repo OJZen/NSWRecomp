@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-enum { LOAD_INVALID = 1, LOAD_ADDRESS_UNAVAILABLE = 75 };
+enum { LOAD_INVALID = 1, LOAD_ADDRESS_UNAVAILABLE = 75, LOAD_MAX_MODULES = 13 };
 
 typedef struct {
     uint64_t base, size, text_offset, text_size, ro_offset, ro_size;
@@ -18,7 +18,7 @@ typedef struct {
 } LoadedModule;
 
 typedef struct {
-    LoadedModule modules[4];
+    LoadedModule modules[LOAD_MAX_MODULES];
     size_t count, page_size, mixed_pages;
     uint64_t bytes, relocations, init_functions, entry_functions;
 } LoadedImage;

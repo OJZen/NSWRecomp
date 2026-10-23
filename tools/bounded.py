@@ -1,4 +1,4 @@
-"""Run one POSIX process group with polling limits; keep its log on the workspace volume."""
+"""Bound a POSIX process group or Windows Job Object; log on the workspace volume."""
 import os
 from pathlib import Path
 import shutil
@@ -20,6 +20,8 @@ def group_rss(rows, group):
 
 
 def sample(group):
+    if os.name == 'nt':
+        return group.rss()
     result = subprocess.run(['ps', '-axo', 'pgid=,rss='], capture_output=True, text=True, timeout=5)
     if result.returncode:
         raise RuntimeError('process memory monitoring unavailable; run in a terminal with process access')
@@ -27,42 +29,61 @@ def sample(group):
 
 
 def run(command, *, cwd, log, seconds=900, rss_limit=1536 << 20, reserve=20 << 30):
-    sample(os.getpgrp())  # Fail before launching if the monitor cannot run.
+    if os.name != 'nt':
+        sample(os.getpgrp())  # Fail before launching if the monitor cannot run.
     if shutil.disk_usage(cwd).free < reserve:
         raise RuntimeError('less than 20 GiB free on the workspace volume')
     log = Path(log)
-    env = dict(os.environ, TMPDIR=str(Path(cwd) / 'work/tmp'), PYTHONDONTWRITEBYTECODE='1')
+    temp = Path(cwd) / 'work/tmp'
+    temp.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, TMPDIR=str(temp), TEMP=str(temp), TMP=str(temp),
+               PYTHONDONTWRITEBYTECODE='1', PYTHONUTF8='1')
     start, peak = time.monotonic(), 0
-    with log.open('w') as output:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
-        try:
-            while process.poll() is None:
-                peak = max(peak, sample(process.pid))
-                if peak > rss_limit:
-                    raise RuntimeError(f'process group exceeded {rss_limit // (1 << 20)} MiB RSS (observed {peak // (1 << 20)} MiB)')
-                if time.monotonic() - start > seconds:
-                    raise RuntimeError('process group exceeded its time budget')
-                if shutil.disk_usage(cwd).free < reserve:
-                    raise RuntimeError('free space fell below the workspace reserve')
-                time.sleep(0.25)
-            if process.returncode:
-                raise RuntimeError(f'child failed with exit code {process.returncode}; see its local log')
-        finally:
-            # Also stop descendants if the direct child exited early.
+    job = None
+    if os.name == 'nt':
+        from windows_job import Job
+        job = Job()
+    try:
+        if job:
+            sample(job)  # Validate the monitor before the gate or command starts.
+        with log.open('w', encoding='utf-8') as output:
+            process = (job.start(command, cwd=cwd, env=env, output=output) if job else
+                       subprocess.Popen(command, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+                                        start_new_session=True))
             try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+                while process.poll() is None:
+                    peak = max(peak, sample(job if job else process.pid))
+                    if peak > rss_limit:
+                        raise RuntimeError(f'process group exceeded {rss_limit // (1 << 20)} MiB RSS (observed {peak // (1 << 20)} MiB)')
+                    if time.monotonic() - start > seconds:
+                        raise RuntimeError('process group exceeded its time budget')
+                    if shutil.disk_usage(cwd).free < reserve:
+                        raise RuntimeError('free space fell below the workspace reserve')
+                    time.sleep(0.25)
+                if process.returncode:
+                    raise RuntimeError(f'child failed with exit code {process.returncode}; see its local log')
+            finally:
+                if job:
+                    job.stop()
+                    process.wait(timeout=10)
+                else:
+                    # Also stop descendants if the direct child exited early.
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait()
+    finally:
+        if job:
+            job.close()
     return {'seconds': round(time.monotonic() - start, 3), 'peak_group_rss_bytes': peak,
             'rss_limit_bytes': rss_limit, 'free_space_reserve_bytes': reserve}
 
@@ -84,4 +105,4 @@ if __name__ == '__main__':
         parser.exit(1, f'{error}\n')
     finally:
         if args.log.is_file():
-            print(args.log.read_text(), end='')
+            print(args.log.read_text(encoding='utf-8', errors='replace'), end='')

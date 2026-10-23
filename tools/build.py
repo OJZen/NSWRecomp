@@ -1,23 +1,29 @@
 """Incremental bounded parallel build and linkage verification; never executes a guest function."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
 
 from bounded import run
+from host import cpu_flags, executable, lock_file, response_args, response_command
 from recompile import ROOT, VENDOR, digest, generate, prepare_work, profile
 
-FLAGS = ['-std=gnu11', '-O2', '-g0', '-fPIC', '-fno-strict-aliasing']
+def optimization_level():
+    value = os.environ.get('NSWRECOMP_OPT_LEVEL', '2')
+    if value not in ('1', '2'):
+        raise ValueError('NSWRECOMP_OPT_LEVEL must be 1 or 2')
+    return value
+
+
+FLAGS = ['-std=gnu11', '-O' + optimization_level(), '-g0', '-fPIC', '-fno-strict-aliasing', *cpu_flags()]
 BUILD = ROOT / 'work/build'
-RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h', 'hle.c', 'hle_symbols.inc', 'game_timing.c', 'game_timing.h')
+RUNTIME = ('probe.c', 'dispatch.h', 'load.c', 'load.h', 'utf8_main.h', 'hle.c', 'hle_symbols.inc', 'hle_windows_symbols.inc', 'game_timing.c', 'game_timing.h')
 
 
 def write_json(path, value):
@@ -29,7 +35,10 @@ def write_json(path, value):
 
 def context():
     compiler = subprocess.check_output(['clang', '--version'], text=True, timeout=10)
-    return {'compiler': compiler, 'flags': FLAGS,
+    target = subprocess.check_output(['clang', '-dumpmachine'], text=True, timeout=10).strip()
+    if os.name == 'nt' and not target.startswith('x86_64-w64-'):
+        raise ValueError('Windows requires x86-64 LLVM MinGW/UCRT Clang on PATH (not clang-cl/MSVC)')
+    return {'compiler': compiler, 'target': target, 'flags': FLAGS,
             'headers': {p.name: digest(p) for p in sorted((VENDOR / 'runtime').glob('*.h'))}}
 
 
@@ -54,8 +63,10 @@ def compile_unit(source, output, source_sha, context_sha, flags):
         raise ValueError('source changed during compilation')
     partial = output.with_suffix('.o.partial')
     try:
-        subprocess.run(['clang', *flags, '-I', str(VENDOR / 'runtime'), '-c', str(source),
-                        '-o', str(partial)], check=True, timeout=120)
+        # We already own an atomic .partial destination. Avoid LLVM's extra
+        # random-name scratch file, which survives a killed Windows compiler.
+        subprocess.run(['clang', *flags, '-fno-temp-file', '-I', str(VENDOR / 'runtime'), '-c', str(source),
+                        '-o', str(partial)], check=True, timeout=300)
         object_sha = digest(partial)
         partial.replace(output)
         write_json(output.with_suffix('.json'), {'source_sha256': source_sha,
@@ -173,7 +184,7 @@ def build(exefs, jobs=None):
     elif json.loads(marker.read_text()) != {'format': 'totk-objects-v1'}:
         raise ValueError('unrecognized build format')
     with (BUILD / 'build.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_file(lock)
         generations = {name: generate(exefs, name) for name in profile()['modules']}
         current = context()
         write_json(BUILD / 'context.json', current)
@@ -192,13 +203,15 @@ def build(exefs, jobs=None):
         objects = object_list(generations, current)
         # This C main validates linked tables without invoking game code or constructors.
         response = BUILD / 'link.rsp'
-        candidate = BUILD / 'link-probe.partial'
-        command = ['clang', *FLAGS, '-DTOTK_LINK_ALL', '-I', str(VENDOR / 'runtime'),
+        candidate = BUILD / executable('link-probe.partial')
+        (BUILD / 'module_tables.inc').write_text(''.join(f'RT_MODULE({name})\n' for name in generations))
+        command = ['clang', *FLAGS, *(['-municode'] if os.name == 'nt' else []),
+                   '-DTOTK_LINK_ALL', '-DNSW_MODULE_TABLES', '-I', str(BUILD), '-I', str(VENDOR / 'runtime'),
                    *[str(ROOT / 'runtime' / name) for name in RUNTIME if name.endswith('.c')],
                    *map(str, objects), '-lm', '-o', str(candidate)]
-        response.write_text(shlex.join(command[1:]) + '\n')
+        response.write_text(response_args(command[1:]) + '\n', encoding='utf-8')
         try:
-            link = run(['clang', '@' + str(response)], cwd=ROOT, log=ROOT / 'work/logs/link.log')
+            link = run(response_command(response), cwd=ROOT, log=ROOT / 'work/logs/link.log')
             execution = run([str(candidate)], cwd=ROOT, log=ROOT / 'work/logs/link-probe.log', seconds=30)
             result = json.loads((ROOT / 'work/logs/link-probe.log').read_text())
             expected = {name: record['functions'] for name, record in generations.items()}
@@ -210,7 +223,7 @@ def build(exefs, jobs=None):
                           generation={name: {'inputs': r['inputs'], 'files': r['files'],
                                       'unsupported_instructions': r['unsupported_instructions']}
                                       for name, r in generations.items()})
-            candidate.replace(BUILD / 'link-probe')
+            candidate.replace(BUILD / executable('link-probe'))
             write_json(BUILD / 'result.json', result)
         finally:
             candidate.unlink(missing_ok=True)
@@ -222,8 +235,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--exefs', type=Path)
     parser.add_argument('--jobs', type=int, choices=range(1, 33), metavar='1..32', help='compiler concurrency; default up to 8 CPU cores')
+    parser.add_argument('--opt-level', choices=('1', '2'), help='Clang optimization level; default 2 or NSWRECOMP_OPT_LEVEL')
     parser.add_argument('--worker', choices=tuple(profile()['modules']), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.opt_level:
+        os.environ['NSWRECOMP_OPT_LEVEL'] = args.opt_level
+        FLAGS[1] = '-O' + args.opt_level
     try:
         if args.worker:
             print(json.dumps(batch(args.worker, jobs=args.jobs)))

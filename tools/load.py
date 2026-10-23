@@ -1,7 +1,6 @@
 """Prepare a bounded NSO relocation plan and verify real native mappings without executing guest code."""
 import argparse
 from collections import Counter
-import fcntl
 import json
 from pathlib import Path
 import struct
@@ -11,6 +10,7 @@ import tempfile
 import zlib
 
 from bounded import run
+from host import executable, lock_file
 from build import BUILD, RUNTIME, context, write_json
 from recompile import ROOT, Nso, digest, generation_inputs, prepare_work, profile, verify
 
@@ -99,7 +99,7 @@ def symbol_scope(modules):
             if s[0] and s[4] and s[1] in (1, 2) and s[3] in (0, 3):
                 # Runtime lookup follows load order, including weak definitions.
                 scope.setdefault(s[0], (m, s))
-    if not 1 <= len(modules) <= 4 or total > 256 << 20:
+    if not 1 <= len(modules) <= 13 or total > 256 << 20:
         raise ValueError('load plan exceeds module or memory budget')
     for m in modules:
         for i, s in enumerate(m.symbols):
@@ -175,7 +175,7 @@ def runtime_sources():
 def verify_build(infos):
     record = json.loads((BUILD / 'result.json').read_text())
     if (record.get('runtime_sources') != runtime_sources() or record['context'] != context()
-            or record['executable_sha256'] != digest(BUILD / 'link-probe')
+            or record['executable_sha256'] != digest(BUILD / executable('link-probe'))
             or any(record['generation'][name]['inputs'] != generation_inputs(info) for name, info in infos.items())):
         raise ValueError('linked probe is stale; rerun make build before load-only')
     return record['executable_sha256']
@@ -183,7 +183,7 @@ def verify_build(infos):
 
 def native_load(plan):
     for attempt in range(1, 9):
-        result = subprocess.run([str(BUILD / 'link-probe'), '--load-only', str(plan)],
+        result = subprocess.run([str(BUILD / executable('link-probe')), '--load-only', str(plan)],
                                 capture_output=True, text=True, timeout=60)
         if result.returncode == ADDRESS_UNAVAILABLE:  # A fresh process may have a different ASLR reservation.
             continue
@@ -227,7 +227,7 @@ def main():
         prepare_work()
         if args.worker_result:
             with (BUILD / 'build.lock').open('r') as lock:
-                fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                lock_file(lock, shared=True)
                 worker(args.exefs, args.worker_result)
             return
         directory = ROOT / 'work/load'

@@ -56,7 +56,7 @@ def decrypt_header(raw, key):
     return out
 
 
-def inspect_package(path, keys, update):
+def inspect_package(path, keys, update, program_id=0x0100f2c0115b6000):
     with path.open('rb') as stream:
         entries = pfs_entries(stream, 0, path.stat().st_size)
         candidates = [(name, *bounds) for name, bounds in entries.items() if name.endswith('.ncz')]
@@ -69,8 +69,8 @@ def inspect_package(path, keys, update):
         raw = exact(stream, 0x4000)
         header = decrypt_header(raw[:0xc00], keys['header_key'])
         nca_size, title = struct.unpack_from('<QQ', header, 0x208)
-        if header[0x205] != 0 or title != 0x0100f2c0115b6000:
-            raise ValueError('package does not contain the expected Zelda program')
+        if header[0x205] != 0 or title != program_id:
+            raise ValueError('package does not contain the selected program')
         generation = max(0, max(header[0x206], header[0x220]) - 1)
         titlekek = keys.get(f'titlekek_{generation:02x}', b'')
         if len(titlekek) != 16:
@@ -159,11 +159,16 @@ def hactool_key_subset(keys, plans):
     return {name: keys[name] for name in sorted(names)}
 
 
-def extract(base, update, key_path, hactool, output, expected):
+def extract(base, update, key_path, hactool, output, expected, *,
+            program_id=0x0100f2c0115b6000, version='1.4.3'):
+    if (not 0 <= program_id < 1 << 64 or not expected
+            or any(not re.fullmatch(r'rtld|main|sdk|subsdk[0-9]', n)
+                   or not re.fullmatch('[0-9a-f]{64}', entry.get('sha256', '')) for n, entry in expected.items())):
+        raise ValueError('invalid program or ExeFS fingerprint profile')
     if output.exists() or output.with_suffix('.json').exists():
         raise ValueError('output already exists; refusing to overwrite')
     keys = read_keys(key_path)
-    plans = [inspect_package(base, keys, False), inspect_package(update, keys, True)]
+    plans = [inspect_package(base, keys, False, program_id), inspect_package(update, keys, True, program_id)]
     work = ROOT / 'work'
     needed = sum(p['nca_size'] for p in plans) + plans[1]['romfs_size'] + (20 << 30)
     if shutil.disk_usage(work).free < needed:
@@ -188,27 +193,66 @@ def extract(base, update, key_path, hactool, output, expected):
                    f'--section{plans[1]["romfs_index"]}=' + str(merged),
                    '--exefsdir=' + str(temp / 'exefs'), str(temp / 'update.nca')]
         # hactool can print encrypted key material too; never persist its raw output.
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=600)
         failed = result.returncode or re.search(r'\(FAIL\)|(?:^|\n)(?:Error:|Failed |Invalid )|corrupted', result.stdout)
         checks = [f'Level {i} (GOOD)' for i in range(6)]
         if plans[1]['metadata_hash']: checks.append('BKTR Metadata Hashes (GOOD)')
         failed = failed or any(check not in result.stdout for check in checks)
         if failed or not merged.is_file() or merged.stat().st_size != plans[1]['romfs_size']:
+            # Report only fixed labels and numbers, never hactool's raw lines:
+            # even errors can contain title-key material.
+            print(json.dumps({'return_code': result.returncode,
+                              'merged_size': merged.stat().st_size if merged.is_file() else None,
+                              'expected_size': plans[1]['romfs_size'],
+                              'missing_checks': [check for check in checks if check not in result.stdout],
+                              'failed_checks': result.stdout.count('(FAIL)'),
+                              'error_lines': len(re.findall(r'(?:^|\n)(?:Error:|Failed |Invalid )', result.stdout))}), flush=True)
             print('Extraction failed verification; diagnostic output withheld to protect keys', flush=True)
             raise ValueError('hactool verification/extraction failed; raw output withheld to protect keys')
         if not all((temp / 'exefs' / n).is_file() and digest(temp / 'exefs' / n) == expected[n]['sha256']
-                   for n in ('rtld', 'main', 'subsdk0', 'sdk')):
-            raise ValueError('merged archive ExeFS does not match the prepared v1.4.3 modules')
+                   for n in expected):
+            raise ValueError('merged archive ExeFS does not match the selected modules')
         with merged.open('rb') as f:
             if struct.unpack('<Q', exact(f, 8))[0] != 0x50:
                 raise ValueError('extracted output is not raw RomFS')
         print('Hashing merged RomFS', flush=True)
-        record = {'version': '1.4.3', 'size': merged.stat().st_size, 'sha256': digest(merged),
+        record = {'version': version, 'program_id': f'{program_id:016x}',
+                  'size': merged.stat().st_size, 'sha256': digest(merged),
                   'nca_sha256': dict(zip(('base', 'update'), archive_hashes)),
                   'hactool_sha256': digest(hactool), 'hactool_hash_checks': 'passed',
-                  'exefs_sha256': {n: expected[n]['sha256'] for n in ('rtld', 'main', 'subsdk0', 'sdk')}}
+                  'exefs_sha256': {n: expected[n]['sha256'] for n in expected}}
         output.parent.mkdir(parents=True, exist_ok=True)
         # A hard link fails if another producer created the destination during extraction.
         os.link(merged, output)
         output.with_suffix('.json').write_text(json.dumps(record, indent=2) + '\n')
     print('Verified merged RomFS ready; temporary archives removed', flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--base', type=Path, required=True)
+    parser.add_argument('--update', type=Path, required=True)
+    parser.add_argument('--keys', type=Path, required=True)
+    parser.add_argument('--profile', type=Path, required=True, help='selected ExeFS module profile')
+    parser.add_argument('--program-id', type=lambda value: int(value, 0), required=True)
+    parser.add_argument('--output', type=Path, required=True, help='new raw image under ignored local/ or work/')
+    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    from recompile import prepare_work
+    from prepare_hactool import tool
+    prepare_work()
+    output = args.output.resolve()
+    if not any(output.is_relative_to(ROOT / name) for name in ('local', 'work')):
+        parser.error('output must stay under ignored local/ or work/')
+    if args.worker:
+        profile = json.loads(args.profile.read_text(encoding='utf-8'))
+        extract(args.base.resolve(), args.update.resolve(), args.keys.resolve(), tool(), output,
+                profile['modules'], program_id=args.program_id, version=profile['version'])
+    else:
+        from bounded import run
+        print(json.dumps(run([sys.executable, str(Path(__file__)), *sys.argv[1:], '--worker'], cwd=ROOT,
+                             log=ROOT / 'work/logs/romfs-extract.log', seconds=900, rss_limit=4 << 30)))
+
+
+if __name__ == '__main__':
+    main()

@@ -14,6 +14,22 @@ from test_nso import fixture
 
 
 class PipelineTests(unittest.TestCase):
+    def test_windows_hle_additions_and_duplicate_rejection(self):
+        import recompile
+        with patch('recompile.os.name', 'nt'):
+            windows = recompile.hle_symbols()
+        with patch('recompile.os.name', 'posix'):
+            shared = recompile.hle_symbols()
+        self.assertEqual(set(windows) - set(shared), {
+            '_ZN2nn2vi12SetLayerCropEPNS0_5LayerEiiii', '_ZN2nn2vi12DestroyLayerEPNS0_5LayerE',
+            '_ZN2nn2vi12CloseDisplayEPNS0_7DisplayE', '_ZN2nn2vi8FinalizeEv'})
+        with tempfile.TemporaryDirectory() as td:
+            common, windows = Path(td) / 'common.inc', Path(td) / 'windows.inc'
+            common.write_text('HLE(example)\n'); windows.write_text('HLE(example)\n')
+            with patch('recompile.os.name', 'nt'), patch('recompile.HLE_SYMBOLS', common), patch('recompile.WINDOWS_HLE_SYMBOLS', windows):
+                with self.assertRaisesRegex(ValueError, 'duplicate'):
+                    recompile.hle_symbols()
+
     def test_failed_generation_preserves_previous_output(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -37,7 +53,13 @@ class PipelineTests(unittest.TestCase):
             root = Path(td)
             target = root / 'elsewhere'
             target.mkdir()
-            (root / 'work').symlink_to(target, target_is_directory=True)
+            try:
+                (root / 'work').symlink_to(target, target_is_directory=True)
+            except OSError as error:
+                import os
+                if os.name == 'nt' and error.winerror == 1314:
+                    self.skipTest('Windows symlinks require Developer Mode or the symlink privilege')
+                raise
             with patch('recompile.ROOT', root):
                 with self.assertRaisesRegex(ValueError, 'symlink'):
                     prepare_work()

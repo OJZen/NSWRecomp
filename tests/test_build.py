@@ -30,6 +30,13 @@ class BuildTests(unittest.TestCase):
         for value in (0, 33, True):
             with self.assertRaises(ValueError): build.compiler_jobs(value)
 
+    def test_optimization_is_explicit_and_bounded(self):
+        for level in ('1', '2'):
+            with patch.dict(build.os.environ, {'NSWRECOMP_OPT_LEVEL': level}):
+                self.assertEqual(build.optimization_level(), level)
+        with patch.dict(build.os.environ, {'NSWRECOMP_OPT_LEVEL': '3'}):
+            with self.assertRaises(ValueError): build.optimization_level()
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix='build-test-')
         self.addCleanup(temp.cleanup)

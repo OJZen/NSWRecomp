@@ -37,7 +37,9 @@ class ImportTests(unittest.TestCase):
             for content in ('invalid', 'header_key = xyz', 'header_key = 00'):
                 path.write_text(content)
                 with self.assertRaises(ValueError): extract_romfs.read_keys(path)
-            path.unlink(); os.mkfifo(path)
+            path.unlink()
+            if os.name == 'nt': path.mkdir()
+            else: os.mkfifo(path)
             with self.assertRaisesRegex(ValueError, 'regular'): extract_romfs.read_keys(path)
 
     def test_hactool_failure_withholds_raw_output_and_removes_private_temporaries(self):
@@ -54,7 +56,8 @@ class ImportTests(unittest.TestCase):
                  patch.object(extract_romfs.shutil, 'disk_usage', return_value=SimpleNamespace(free=100 << 30)), \
                  contextlib.redirect_stdout(captured):
                 with self.assertRaisesRegex(ValueError, 'raw output withheld'):
-                    extract_romfs.extract(root / 'base', root / 'update', root / 'key', root / 'hactool', root / 'output.bin', {})
+                    extract_romfs.extract(root / 'base', root / 'update', root / 'key', root / 'hactool', root / 'output.bin',
+                                          {'main': {'sha256': '0' * 64}}, program_id=0x1234, version='synthetic')
             self.assertNotIn('private diagnostic marker', captured.getvalue())
             self.assertEqual(list((root / 'work/tmp').iterdir()), [])
             self.assertFalse((root / 'output.bin').exists())

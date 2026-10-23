@@ -2,10 +2,16 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#else
+#include <sys/mman.h>
 #include <unistd.h>
+#endif
 #ifdef __APPLE__
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -48,7 +54,9 @@ void unload_image(LoadedImage *image) {
     for (size_t i = 0; i < image->count; i++) {
         LoadedModule *m = &image->modules[i];
         if (m->memory) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+            VirtualFree(m->memory, 0, MEM_RELEASE);
+#elif defined(__APPLE__)
             mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)m->memory, m->mapped_size);
 #else
             munmap(m->memory, m->mapped_size);
@@ -72,7 +80,30 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
     /* Never replace live mappings or silently load the same image twice. */
     if (image->count || !has_function) return 1;
     FILE *file = NULL;
+#ifdef _WIN32
+    // Open the reparse point itself and reject it, matching O_NOFOLLOW. Binary
+    // mode is essential: plans contain bytes which Windows text I/O rewrites.
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (!length) return LOAD_INVALID;
+    wchar_t *wide = malloc((size_t)length * sizeof *wide);
+    if (!wide) return LOAD_INVALID;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, length)) {
+        free(wide); return LOAD_INVALID;
+    }
+    HANDLE handle = CreateFileW(wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return LOAD_INVALID;
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(handle, &info) || GetFileType(handle) != FILE_TYPE_DISK ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) {
+        CloseHandle(handle); return LOAD_INVALID;
+    }
+    int fd = _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+    if (fd < 0) { CloseHandle(handle); return LOAD_INVALID; }
+#else
     int fd = open(path, O_RDONLY | O_NOFOLLOW);
+#endif
     if (fd < 0) return 1;
     struct stat st;
     if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size < 16 || st.st_size > (256 << 20)) {
@@ -87,11 +118,17 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
     size_t module_index = 0;
     int native_error = 0;
     int result = LOAD_INVALID;
+#ifdef _WIN32
+    SYSTEM_INFO system;
+    GetSystemInfo(&system);
+    long page = system.dwPageSize;
+#else
     long page = sysconf(_SC_PAGESIZE);
+#endif
     if (page < 4096 || page > 65536 || (page & (page - 1))) goto fail;
     image->page_size = (size_t)page;
     if (fread(magic, 1, 8, file) != 8 || memcmp(magic, "TKLOAD1\0", 8) ||
-        !read_u64(file, &count) || !count || count > 4) goto fail;
+        !read_u64(file, &count) || !count || count > LOAD_MAX_MODULES) goto fail;
 
     for (uint64_t i = 0; i < count; i++) {
         module_index = i;
@@ -121,7 +158,20 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
             image->bytes + m->mapped_size > (256 << 20)) goto fail;
         void *requested = (void *)(uintptr_t)h->base;
         stage = "address reservation";
-#ifdef __APPLE__
+#ifdef _WIN32
+        if (h->base % system.dwAllocationGranularity) goto fail;
+        void *mapped = VirtualAlloc(requested, m->mapped_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        if (!mapped) {
+            native_error = (int)GetLastError();
+            if (native_error == ERROR_INVALID_ADDRESS) result = LOAD_ADDRESS_UNAVAILABLE;
+            goto fail;
+        }
+        if (mapped != requested) {
+            VirtualFree(mapped, 0, MEM_RELEASE);
+            result = LOAD_ADDRESS_UNAVAILABLE;
+            goto fail;
+        }
+#elif defined(__APPLE__)
         mach_vm_address_t address = h->base;
         // mmap's address hint may be ignored; FIXED without OVERWRITE fails on collisions.
         native_error = mach_vm_allocate(mach_task_self(), &address, m->mapped_size, VM_FLAGS_FIXED);
@@ -194,9 +244,15 @@ int load_plan(const char *path, LoadedImage *image, int (*has_function)(uint64_t
                        overlaps(h->ro_offset, h->ro_size, at, image->page_size);
             int write = overlaps(h->data_offset, h->data_size + h->bss_size, at, image->page_size);
             image->mixed_pages += read && write;
+#ifdef _WIN32
+            DWORD old, prot = write ? PAGE_READWRITE : read ? PAGE_READONLY : PAGE_NOACCESS;
+            if (!VirtualProtect((unsigned char *)m->memory + at, image->page_size, prot, &old)) {
+                native_error = (int)GetLastError();
+#else
             int prot = write ? PROT_READ | PROT_WRITE : read ? PROT_READ : PROT_NONE;
             if (mprotect((unsigned char *)m->memory + at, image->page_size, prot)) {
                 native_error = errno;
+#endif
                 goto fail;
             }
         }

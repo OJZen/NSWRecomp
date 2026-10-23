@@ -117,3 +117,15 @@
              free(relocs);
              free(subs);
              ctx->bktr_ctx.relocation_block = NULL;
+
+--- a/mbedtls/include/mbedtls/bn_mul.h
++++ b/mbedtls/include/mbedtls/bn_mul.h
+@@ -179,7 +179,7 @@
+ #define MULADDC_STOP                        \
+         : "+c" (c), "+D" (d), "+S" (s)      \
+         : "b" (b)                           \
+-        : "rax", "rdx", "r8"                \
++        : "rax", "rdx", "r8", "cc", "memory" \
+     );
+ 
+ #endif /* AMD64 */
