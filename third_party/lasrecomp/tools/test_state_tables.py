@@ -1,6 +1,8 @@
 """Unguarded enum-state tables, built entirely from synthetic instructions and metadata."""
 import contextlib
 import ctypes
+from contextlib import ExitStack
+from native_test import native_library
 import io
 from pathlib import Path
 import struct
@@ -20,7 +22,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 class StateTableTests(unittest.TestCase):
     def test_byte_offset_domain_without_a_constant_index_bound(self):
-        with tempfile.TemporaryDirectory(prefix='byte-domain-') as temp:
+        with tempfile.TemporaryDirectory(prefix='byte-domain-') as temp, ExitStack() as libraries:
             directory = Path(temp)
             for variant in ('guard', 'conditional', 'unguarded', 'cross-function', 'cross-unguarded', 'wide', 'writable', 'clobbered', 'outside-text'):
                 with self.subTest(variant=variant):
@@ -86,7 +88,7 @@ uint64_t rt_ticks(void) { abort(); }
                                     *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
                                    check=True, timeout=30, capture_output=True)
                     ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
-                    native = ctypes.CDLL(str(library)); native.run.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
+                    native = libraries.enter_context(native_library(library)); native.run.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
                     native.run.restype = ctypes.c_uint64
                     for value in (*range(256), 4095): self.assertEqual(native.run(value, 0), 256 - (value & 255))
                     if variant != 'cross-unguarded': self.assertEqual(native.run(4096, 1), 99)
@@ -98,7 +100,7 @@ uint64_t rt_ticks(void) { abort(); }
                     subtract_mask=False, dead_base=False, joined_base=False, indirect_entry=False,
                     vector_write=False, branch_clobber=False, selected_base=False, call_base=None,
                     nested_predecessor=False, taken_guard=False, split_branch=False, padding=False):
-        with tempfile.TemporaryDirectory(prefix='state-table-') as temp:
+        with tempfile.TemporaryDirectory(prefix='state-table-') as temp, ExitStack() as libraries:
             directory = Path(temp)
             table = 0x500 if writable else 0x300
             function_entry = 0x20 if long_guard or (guarded and scheduled > 15) else 0x60 if distant else 0x80
@@ -254,7 +256,7 @@ uint64_t rt_ticks(void) { abort(); }
                             *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
                            check=True, timeout=30, capture_output=True)
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
-            native = ctypes.CDLL(str(library)); native.run.argtypes = [ctypes.c_uint64]; native.run.restype = ctypes.c_uint64
+            native = libraries.enter_context(native_library(library)); native.run.argtypes = [ctypes.c_uint64]; native.run.restype = ctypes.c_uint64
             for value, expected in enumerate((11, 22, 33), int(subtract_mask)): self.assertEqual(native.run(value), expected)
             if joined_base:
                 for value, expected in enumerate((55, 66, 77)): self.assertEqual(native.run((1 << 32) | value), expected)

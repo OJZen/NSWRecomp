@@ -1,6 +1,8 @@
 """Synthetic jump tables whose case labels cross discovered function boundaries."""
 import contextlib
 import ctypes
+from contextlib import ExitStack
+from native_test import native_library
 import io
 from pathlib import Path
 import struct
@@ -20,7 +22,7 @@ ROOT = Path(nso.__file__).resolve().parents[1]
 
 class JumpTableTests(unittest.TestCase):
     def check_table(self, taken, split_guard=False, prior_load=False, conditional=False, unsafe=False, dual_guard=False, restored=False, clobbered=False, index_register=0, normalized=False):
-        with tempfile.TemporaryDirectory(prefix='jump-table-') as temp:
+        with tempfile.TemporaryDirectory(prefix='jump-table-') as temp, ExitStack() as libraries:
             directory = Path(temp)
             if restored:
                 instructions = ['mov w6, w0', 'cmp w0, #2', 'b.hi .+64', 'ldr x4, [x5]', 'ldr x4, [x4]',
@@ -105,7 +107,7 @@ uint64_t rt_ticks(void) { abort(); }
                             *map(str, output.glob('*.c')), str(wrapper), '-o', str(library)],
                            check=True, timeout=30, capture_output=True)
             ctypes.memmove(base, bytes(module.nso.image), len(module.nso.image))
-            native = ctypes.CDLL(str(library))
+            native = libraries.enter_context(native_library(library))
             native.run.argtypes = [ctypes.c_uint64, ctypes.c_uint64]
             native.run.restype = ctypes.c_uint64
             values = ((0, 11), (1, 22), (2, 33), (3, 99), (0xffffffff, 99))

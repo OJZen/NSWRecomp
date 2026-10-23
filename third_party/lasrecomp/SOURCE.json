@@ -32,10 +32,11 @@
     "tools/test_gen_generic.py": "99385a33bab49ad848ad3dd90af10edb3f0229e60dd93f3842693a999f6c1122",
     "tools/test_nso.py": "0993180e2bb3ed7863931818bda96ba2b864c45716c3441855e522809bd7dc2a",
     "tools/test_cpu_native.c": "e47a5aeaabc186c695caacf9c2265479a572e4ed4d462bcfe2ccd873eeb072c2",
-    "tools/test_cpu_semantics.py": "c5475135adc65be0e7b2a0820ef9532bf7275a3111db20dc9a4d7ff3b40ca140",
-    "tools/test_fpsr.py": "245707c9c4aa82089a71c8b49960fd6a0da0bf619c98bd44a964a1076d7b077f",
-    "tools/test_jump_tables.py": "719e4e4a6617c3f4d8d84255ba21c2f19ee818704a311fffa8d277f965d9a788",
-    "tools/test_state_tables.py": "0ef3e04782d7ac6db036a6f40ac37d7ed74d415adb0c831b33f19e4da0669efd"
+    "tools/test_cpu_semantics.py": "549d6dd6ad23daba3b1aae210cd48d93adaa563ac98eeec24f2b65e2e17a6865",
+    "tools/test_fpsr.py": "06e2cebec2566c3879b7c790ebfcb02e798128e9d0bbcde1f84952ecb169e143",
+    "tools/test_jump_tables.py": "586b18f62cd152e49adc5a642ff7e0efb86150daa85a35616281dd3b24a5fabc",
+    "tools/test_state_tables.py": "8660c2b8a107d8021f12383214daa9187b76e69cade9323ec1e1f81e35a8c1d3",
+    "tools/native_test.py": "fae79358fcfe0a7df2e6d5d8681c981bc9395a1484b8c6f0b6edac2e3f2554ef"
   },
   "runtime_reference": {
     "file": "runtime/dispatch.c",
@@ -46,6 +47,10 @@
   },
   "maintenance": "NSWRecomp maintains this derived subset locally; upstream revisions describe its origin.",
   "local_changes": {
-    "tools/test_state_tables.py": "Use a distinct shared-library path for each synthetic byte-table variant so dlopen cannot reuse an earlier variant."
+    "tools/test_state_tables.py": "Use a distinct shared-library path for each synthetic byte-table variant so dlopen cannot reuse an earlier variant. Windows test-library dependency lookup and explicit lifetime before temporary directory cleanup.",
+    "tools/native_test.py": "Windows test-library dependency lookup and explicit lifetime before temporary directory cleanup.",
+    "tools/test_cpu_semantics.py": "Windows test-library dependency lookup and explicit lifetime before temporary directory cleanup.",
+    "tools/test_fpsr.py": "Windows test-library dependency lookup and explicit lifetime before temporary directory cleanup.",
+    "tools/test_jump_tables.py": "Windows test-library dependency lookup and explicit lifetime before temporary directory cleanup."
   }
 }

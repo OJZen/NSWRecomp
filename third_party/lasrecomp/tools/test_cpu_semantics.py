@@ -12,6 +12,7 @@ import capstone
 import unicorn as uc
 from unicorn import arm64_const as A
 from lifter import Lifter, exclusive_pair_transaction
+from native_test import native_library
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE = 0x100000
@@ -34,6 +35,7 @@ class CpuSemanticsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix='cpu-semantics-')
+        cls.addClassCleanup(cls.temp.cleanup)
         cls.directory = Path(cls.temp.name)
         cls.cases = []
         code = ['#include "cpu.h"', '#include "simd.h"']
@@ -61,17 +63,13 @@ class CpuSemanticsTests(unittest.TestCase):
         subprocess.run(['clang', *flags, cls.optimization, '-fno-strict-aliasing', '-shared', '-fPIC', '-pthread',
                         '-I', str(ROOT / 'runtime'), str(source), str(ROOT / 'tools/test_cpu_native.c'),
                         '-lm', '-o', str(library)], check=True, timeout=60, capture_output=True)
-        cls.lib = ctypes.CDLL(str(library))
+        cls.lib = cls.enterClassContext(native_library(library))
         cls.buffer = (ctypes.c_ubyte * 8192)()
         cls.address = (ctypes.addressof(cls.buffer) + 4095) & ~4095
         cls.mu = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
         cls.mu.mem_map(CODE, 4096)
         cls.mu.mem_map(cls.address, 4096)
         cls.state = (ctypes.c_uint64 * 128)()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temp.cleanup()
 
     def compare(self, words, function, seed, regs=None, fpcr=0):
         rng = random.Random(seed)

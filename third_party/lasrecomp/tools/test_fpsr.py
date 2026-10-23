@@ -1,5 +1,6 @@
 """Synthetic FPSR tests: lifted C versus Unicorn and, on AArch64, native instructions."""
 import ctypes
+from native_test import native_library
 import json
 from pathlib import Path
 import platform
@@ -165,7 +166,7 @@ class FpsrTests(unittest.TestCase):
         source.write_text('\n'.join(code))
         subprocess.run(['clang', cls.optimization, '-fno-strict-aliasing', '-shared', '-fPIC', '-I', str(ROOT / 'runtime'),
                         str(source), '-lm', '-o', str(library)], check=True, timeout=60)
-        cls.lib = ctypes.CDLL(str(library))
+        cls.lib = cls.enterClassContext(native_library(library))
         cls.hw = platform.machine().lower() in ('arm64', 'aarch64')
         cls.mu = uc.Uc(uc.UC_ARCH_ARM64, uc.UC_MODE_ARM)
         cls.mu.mem_map(CODE, 4096)
