@@ -189,6 +189,14 @@ without concurrently tearing down services still used by guest threads. Keep suc
 and stopped-run receipts separately in an ignored experiment directory when
 comparing stages, because the next run replaces `work/startup/result.json`.
 
+For synchronization diagnosis, `NSW_TRACE_WAITS=1` includes guest wait frames in
+the bounded thread snapshot. `NSW_TRACE_SYNC_RANGE=0xLOW:0xHIGH` records at most
+512 mutex/condition transitions whose address or nonzero key lies in that
+half-open guest address range. Recording uses an in-memory buffer without I/O
+under the scheduler lock; published entries remain readable when that lock is
+busy. It changes no wait, notification or timeout semantics. Keep addresses,
+traces and title-specific conclusions in ignored local reports.
+
 Compiler control-flow/data discovery issues and
 expensive `-O2` units remain separate compiler work; do not suppress their traps
 to claim startup or gameplay compatibility.

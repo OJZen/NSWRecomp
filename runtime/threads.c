@@ -40,6 +40,13 @@ static Thread *all;
 static _Thread_local Thread *current;
 static atomic_bool stopping;
 static bool trace_waits;
+static uint64_t sync_trace_low, sync_trace_high, sync_trace_count;
+static struct {
+    uint64_t ns, address, key;
+    const char *phase;
+    uint32_t thread, value, key_value, tag, result;
+    atomic_bool ready;
+} sync_events[512];
 // A bounded diagnostic history remains readable even when the scheduler mutex
 // is stuck. Entries contain no pointers to reclaimable Thread objects.
 static struct {atomic_uint_fast64_t id,pc,lr,x0,svc;} recent[128];
@@ -143,12 +150,30 @@ static bool compare_word(uint64_t address, uint32_t *expected, uint32_t value) {
     return __atomic_compare_exchange_n((uint32_t *)(uintptr_t)address, expected, value, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
 
+// Optional address-filtered diagnostics. Called with the scheduler lock held;
+// no scheduling decisions depend on this output, which is capped per process.
+static void trace_sync(const char *phase, uint64_t address, uint64_t key, uint32_t tag, uint32_t result) {
+    if (!sync_trace_high || sync_trace_count >= 512 ||
+        !((address >= sync_trace_low && address < sync_trace_high) ||
+          (key && key >= sync_trace_low && key < sync_trace_high))) return;
+    uint32_t value = 0, key_value = 0;
+    host_read(&value, address, sizeof value);
+    if (key) host_read(&key_value, key, sizeof key_value);
+    size_t slot = sync_trace_count++;
+    sync_events[slot].ns = now(); sync_events[slot].address = address; sync_events[slot].key = key;
+    sync_events[slot].phase = phase; sync_events[slot].thread = current ? current->handle : 0;
+    sync_events[slot].value = value; sync_events[slot].key_value = key_value;
+    sync_events[slot].tag = tag; sync_events[slot].result = result;
+    atomic_store_explicit(&sync_events[slot].ready, true, memory_order_release);
+}
+
 static void handoff(uint64_t address) {
     Thread *next = pick(MUTEX, address);
-    if (!next) { write_word(address, 0); return; }
+    if (!next) { write_word(address, 0); trace_sync("unlock", address, 0, 0, 0); return; }
     unsigned count = 0;
     for (Thread *t = all; t; t = t->next) count += t->wait == MUTEX && t->wait_address == address;
     write_word(address, next->tag | (count > 1 ? WAITERS : 0));
+    trace_sync("handoff", address, next->key, next->tag, 0);
     wake(next, 0);
 }
 
@@ -156,10 +181,14 @@ static void reacquire(Thread *thread) {
     uint32_t value = read_word(thread->wait_address);
     for (;;) {
         if (!value) {
-            if (compare_word(thread->wait_address, &value, thread->tag)) { wake(thread, 0); return; }
+            if (compare_word(thread->wait_address, &value, thread->tag)) {
+                trace_sync("reacquired", thread->wait_address, thread->key, thread->tag, 0);
+                wake(thread, 0); return;
+            }
         } else if (compare_word(thread->wait_address, &value, value | WAITERS)) {
             thread->wait = MUTEX;
             thread->order = ++wait_order;
+            trace_sync("reacquire-wait", thread->wait_address, thread->key, thread->tag, 0);
             return;
         }
     }
@@ -182,6 +211,20 @@ uint32_t threads_init(void) {
     if (current || active || all) abort();
     atomic_store(&stopping, false);
     trace_waits=getenv("NSW_TRACE_WAITS")!=NULL;
+    sync_trace_low = sync_trace_high = sync_trace_count = 0;
+    for (unsigned i = 0; i < 512; i++) atomic_store(&sync_events[i].ready, false);
+    const char *range = getenv("NSW_TRACE_SYNC_RANGE");
+    if (range && *range) {
+        char *end;
+        uint64_t low = strtoull(range, &end, 0);
+        if (end != range && *end == ':') {
+            const char *upper = end + 1;
+            uint64_t high = strtoull(upper, &end, 0);
+            if (end != upper && !*end && low < high && high <= (1ull << 39)) {
+                sync_trace_low = low; sync_trace_high = high;
+            }
+        }
+    }
     Thread *thread = new_thread();
     if (!thread) abort();
     thread->started = true; thread->priority = 44; thread->core = 0; thread->mask = 7;
@@ -216,6 +259,14 @@ void threads_trace(uint64_t address,uint64_t lr,uint64_t x0) {
     atomic_store(&recent[slot].lr,lr); atomic_store(&recent[slot].x0,x0);
 }
 void threads_dump(void) {
+    // Published records never change. Dumping does not need the scheduler lock
+    // and recording does not perform I/O while a guest waiter holds that lock.
+    for (unsigned i = 0; i < 512; i++) if (atomic_load_explicit(&sync_events[i].ready, memory_order_acquire)) {
+        fprintf(stderr, "SYNC seq=%u ns=%llu thread=%x phase=%s address=%llx value=%x key=%llx key_value=%x tag=%x result=%x\n",
+            i + 1, (unsigned long long)sync_events[i].ns, sync_events[i].thread, sync_events[i].phase,
+            (unsigned long long)sync_events[i].address, sync_events[i].value,
+            (unsigned long long)sync_events[i].key, sync_events[i].key_value, sync_events[i].tag, sync_events[i].result);
+    }
     if(pthread_mutex_trylock(&lock)) {
         fputs("THREAD diagnostics lock is busy; bounded recent traces follow\n",stderr);
         for(unsigned i=0;i<128;i++) if(atomic_load(&recent[i].id)) fprintf(stderr,"THREAD recent id=%llx pc=%llx lr=%llx x0=%llx svc=%llx\n",
@@ -483,19 +534,24 @@ bool threads_svc(unsigned number, uint64_t *r) {
             }
         } else if (number == 0x1b) handoff(address);
         else if (number == 0x1c) {
+            trace_sync("wait-enter", address, r[1], (uint32_t)r[2], 0);
             // Publish the key before releasing the mutex, so a user-space notifier cannot miss this waiter.
             write_word(r[1], 1);
             current->wait = CONDITION; current->key = r[1]; current->wait_address = address;
             current->tag = (uint32_t)r[2]; current->order = ++wait_order;
             handoff(address);
+            trace_sync("wait-published", address, r[1], (uint32_t)r[2], 0);
             result = block(current, (int64_t)r[3]);
+            trace_sync("wait-return", address, current->key, current->tag, result);
         } else if (number == 0x1d) {
             int count = (int)r[1];
+            trace_sync("notify", address, address, 0, (uint32_t)count);
             for (int i = 0; count <= 0 || i < count; i++) {
                 Thread *thread = pick(CONDITION, address); if (!thread) break;
                 reacquire(thread);
             }
             if (!pick(CONDITION, address)) write_word(address, 0);
+            trace_sync("notify-done", address, address, 0, 0);
         } else if (number == 0x34) {
             uint32_t value, type = (uint32_t)r[1], expected = (uint32_t)r[2];
             for (;;) {

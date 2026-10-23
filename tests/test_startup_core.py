@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -253,6 +254,19 @@ const uint64_t sdk_fn_count = 1;
         for value in (False, 1):
             with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
                 startup.native_report(json.dumps(dict(report, window_closed=value)), 0, 'nnMain', graphics=True)
+
+    def test_sync_diagnostics_are_bounded_and_address_filtered(self):
+        for address_range, expected in (('0:0x8000000000', 512), ('0:1', 0), ('broken', 0)):
+            with self.subTest(address_range=address_range):
+                for _ in range(8):
+                    result = subprocess.run([str(self.threads), 'sync-trace'], capture_output=True, text=True, timeout=25,
+                        env=dict(os.environ, UBSAN_OPTIONS='halt_on_error=1', NSW_TRACE_SYNC_RANGE=address_range))
+                    if result.returncode != load.ADDRESS_UNAVAILABLE: break
+                self.assertEqual(result.returncode, 0, result.stderr)
+                records = re.findall(r'^SYNC seq=(\d+) .*phase=([^ ]+)', result.stderr, re.M)
+                self.assertEqual([int(sequence) for sequence, _ in records], list(range(1, expected + 1)))
+                if records:
+                    self.assertTrue({'wait-enter', 'wait-published', 'notify', 'reacquire-wait', 'handoff', 'wait-return'} <= {phase for _, phase in records})
 
     def test_native_memory_and_main_thread_contracts(self):
         for _ in range(8):

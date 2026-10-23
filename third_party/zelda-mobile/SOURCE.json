@@ -99,9 +99,9 @@
       "license": "MIT",
       "use": "Thread and synchronization algorithms adapted to Cpu dispatch, retained wait references and cooperative shutdown.",
       "local_adaptations": {
-        "note": "Windows bounded initialization adds atomic per-thread trace snapshots and optional captured wait frames without changing condition-variable timeout ownership.",
+        "note": "Windows bounded initialization adds atomic per-thread trace snapshots and optional captured wait frames without changing condition-variable timeout ownership. Address-filtered mutex/condition diagnostics publish at most 512 immutable in-memory records without scheduler-lock I/O.",
         "lf_sha256": {
-          "runtime/threads.c": "6dbea0c4a1c609aefaa1ebcbd421c5762aaeb1dae5e252114ab71654a6fdd76c",
+          "runtime/threads.c": "187457d3cb278343dbbb7c2c53ccff2071714bbe12a80926c0601ac8719ece2a",
           "runtime/threads.h": "b8b868aca8af31c4ff9c9e385acd9c85e6ade7f097f0cc56de50cfb98e60166c"
         }
       }

@@ -75,7 +75,7 @@ static uint64_t info(unsigned type) {
 }
 
 int main(int argc, char **argv) {
-    (void)argv;
+    bool trace = argc > 1 && !strcmp(argv[1], "sync-trace");
 #ifndef _WIN32
     alarm(20);
 #endif
@@ -87,7 +87,7 @@ int main(int argc, char **argv) {
     uint32_t main_handle;
     int initialized = kernel_init(&image, (uintptr_t)memory + 0x10000, 0x10000, &main_handle);
     if (initialized) { host_release(memory, 0x20000); return initialized; }
-    if (argc > 1) {
+    if (argc > 1 && !trace) {
         threads_test_main_quiescent = parked;
         pthread_t host; assert(!pthread_create(&host, NULL, external_stop, NULL));
         for (;;) { threads_checkpoint(); sched_yield(); }
@@ -134,6 +134,15 @@ int main(int argc, char **argv) {
         r[0] = shared->child; svc(0x16, r); assert(!r[0]);
         if (shared->mode != 2) { r[0] = reader; svc(0x16, r); assert(!r[0]); }
         r[0] = writer; svc(0x16, r); assert(!r[0]);
+        if (trace && iteration == 31) {
+            // Saturate diagnostics after real mutex/condition handoffs. Tracing
+            // may drop records, but must not retain notifications for future waits.
+            for (unsigned i = 0; i < 600; i++) {
+                r[0] = (uintptr_t)&shared->key; r[1] = 1; svc(0x1d, r); assert(!r[0]);
+            }
+            assert(!atomic_load(&shared->key));
+            threads_dump();
+        }
     }
     kernel_destroy();
     assert(!host_release(memory, 0x20000));
