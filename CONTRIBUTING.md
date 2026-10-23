@@ -88,8 +88,10 @@ git config --local remote.origin.push refs/heads/main:refs/heads/main
 
 `pre-commit` checks the full index, commit identities and whitespace. `pre-push`
 allows only `main` to `origin` and scans the actual outgoing commit and its full
-ancestry. Findings identify locations and categories without printing matched
-values. The lightweight rules cover common privacy and credential patterns and
+ancestry. Both hooks prefer this checkout's virtual environment
+(`work/venv/Scripts/python.exe` on Windows or `work/venv/bin/python` on POSIX),
+falling back to `python3` on PATH. Findings identify locations and categories
+without printing matched values. The lightweight rules cover common privacy and credential patterns and
 excluded artifact types; they do not replace manual review.
 
 Retain public attribution and source hashes in third-party notices. Investigate

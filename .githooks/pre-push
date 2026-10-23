@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python=python3
+if [ -x "$root/work/venv/Scripts/python.exe" ]; then
+    python="$root/work/venv/Scripts/python.exe"
+elif [ -x "$root/work/venv/bin/python" ]; then
+    python="$root/work/venv/bin/python"
+fi
 if [ "$1" != origin ]; then
     echo 'Publication policy: push only main to origin.' >&2
     exit 1
@@ -10,5 +16,5 @@ while read -r local_ref local_oid remote_ref remote_oid; do
         echo 'Publication policy: branches other than main, tags and deletions are blocked.' >&2
         exit 1
     fi
-    PYTHONDONTWRITEBYTECODE=1 python3 "$root/tools/check_publication.py" --ref "$local_oid"
+    PYTHONDONTWRITEBYTECODE=1 "$python" "$root/tools/check_publication.py" --ref "$local_oid"
 done

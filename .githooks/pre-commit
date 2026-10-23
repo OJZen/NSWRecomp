@@ -1,7 +1,13 @@
 #!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PYTHONDONTWRITEBYTECODE=1 python3 "$root/tools/check_publication.py" --staged
+python=python3
+if [ -x "$root/work/venv/Scripts/python.exe" ]; then
+    python="$root/work/venv/Scripts/python.exe"
+elif [ -x "$root/work/venv/bin/python" ]; then
+    python="$root/work/venv/bin/python"
+fi
+PYTHONDONTWRITEBYTECODE=1 "$python" "$root/tools/check_publication.py" --staged
 if ! git diff --cached --check >/dev/null 2>&1; then
     echo 'Commit blocked: staged whitespace errors; inspect the diff locally.' >&2
     exit 1
