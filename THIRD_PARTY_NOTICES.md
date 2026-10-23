@@ -14,6 +14,14 @@ Use this subset through `tools/recompile.py`, which always disables game-specifi
 The static function cache in `runtime/probe.c` adapts LASRecomp's MIT
 `runtime/dispatch.c`; its revision and source digest are also recorded in that manifest.
 
+The C headers under `third_party/vulkan-headers/` are the core declarations and
+their required video declarations from [Khronos Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers),
+tag `vulkan-sdk-1.4.363.0`, revision `6802bb4733b63ed5efd3adb308a6c885ef180ea1`.
+They retain their Apache-2.0 OR MIT notices and license texts. `SOURCE.json`
+records the unmodified file hashes. No Vulkan loader, driver, shader compiler or
+SDK binaries are vendored; the optional Windows backend loads the system Vulkan
+loader. The host implementation and synthetic driver tests are local code.
+
 Development dependencies are installed separately, not vendored or linked into a game:
 
 | Dependency | Version | License / use |
