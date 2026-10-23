@@ -197,6 +197,10 @@ under the scheduler lock; published entries remain readable when that lock is
 busy. It changes no wait, notification or timeout semantics. Keep addresses,
 traces and title-specific conclusions in ignored local reports.
 
+An exact-input adapter can optionally protect a verified completion callback with
+its compiled guest mutex helpers. See [callback mutex guards](callback-guards.md)
+for the explicit binding, fingerprint and call-boundary requirements.
+
 Compiler control-flow/data discovery issues and
 expensive `-O2` units remain separate compiler work; do not suppress their traps
 to claim startup or gameplay compatibility.

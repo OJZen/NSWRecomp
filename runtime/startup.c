@@ -7,6 +7,9 @@
 #include "services.h"
 #endif
 #include "threads.h"
+#ifdef NSW_CALLBACK_GUARDS
+#include "callback_guard.h"
+#endif
 #ifdef NSW_VULKAN
 #include "vulkan_runtime.h"
 #include "vulkan_display.h"
@@ -55,6 +58,7 @@ static void report(void) {
            "\"initialization_executed\":%s,\"window_closed\":%s,\"title_verified\":false,"
            "\"stop_reason\":\"%s\",\"runtime_mode\":\"%s\",\"kernel_only\":%s,"
            "\"window_created\":%s,\"window_frames_submitted\":%llu,\"window_frames_painted\":%llu,"
+           "\"callback_guards_sha256\":\"%s\",\"callback_guards_completed\":%llu,"
            "\"vulkan_device_created\":%s,\"vulkan_clear_submissions\":%llu,\"vulkan_readback_pixels\":%llu,\"vulkan_depth_clear_submissions\":%llu,\"vulkan_compute_submissions\":%llu,\"vulkan_shader_draws\":%llu}\n",
            atomic_load(&completed_stages), atomic_load(&stage), (unsigned long long)atomic_load(&calls),
            atomic_load(&constructors_completed) ? "true" : "false", atomic_load(&entered_main) ? "true" : "false",
@@ -67,11 +71,20 @@ static void report(void) {
 #endif
 #ifdef NSW_VULKAN
            window.created ? "true" : "false", (unsigned long long)window.submitted, (unsigned long long)window.painted,
+#else
+           "false", 0ull, 0ull,
+#endif
+#ifdef NSW_CALLBACK_GUARDS
+           callback_guards_sha256, (unsigned long long)callback_guards_completed(),
+#else
+           "", 0ull,
+#endif
+#ifdef NSW_VULKAN
            vulkan_runtime_device_created() ? "true" : "false",
            (unsigned long long)vulkan_runtime_clear_count(), (unsigned long long)vulkan_runtime_readback_pixels(),
            (unsigned long long)vulkan_runtime_depth_clear_count(), (unsigned long long)vulkan_runtime_dispatch_count(), (unsigned long long)vulkan_runtime_draw_count()
 #else
-           "false", 0ull, 0ull, "false", 0ull, 0ull, 0ull, 0ull, 0ull
+           "false", 0ull, 0ull, 0ull, 0ull, 0ull
 #endif
            );
 }
@@ -177,6 +190,14 @@ void rt_report_graphics_error(Cpu *c, const char *message) {
 #ifdef _WIN32
     stop_worker();
 #endif
+}
+
+_Noreturn void rt_report_adapter_error(Cpu *c, const char *message) {
+    atomic_store(&stop_reason, "adapter_guard_error");
+    fprintf(stderr, "STARTUP adapter guard: %s\n", message);
+    guest_trace(c);
+    stop_worker();
+    _Exit(78);
 }
 
 void rt_svc(Cpu *c, uint32_t number, uint64_t pc) {

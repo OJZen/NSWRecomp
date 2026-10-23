@@ -157,7 +157,7 @@ const uint64_t sdk_fn_count = 1;
         with self.assertRaisesRegex(ValueError, 'missing startup export'):
             startup.entries(modules)
 
-    def run_worker(self, mode, seconds=5, basic_services=False):
+    def run_worker(self, mode, seconds=5, basic_services=False, guard_sha256=''):
         exefs = self.root / 'exefs'
         exefs.mkdir(exist_ok=True)
         modules = [fixture(exefs / 'main', exports=('_init_libc0',)), fixture(exefs / 'sdk', main=False)]
@@ -168,7 +168,7 @@ const uint64_t sdk_fn_count = 1;
                 patch.dict(os.environ, NSW_TEST_STARTUP=mode):
             startup.worker(exefs, '_init_libc0', self.basic_binary if basic_services else self.binary, output,
                            seconds=seconds, kernel_only=not basic_services, basic_services=basic_services,
-                           npdm_sha256=startup.digest(metadata) if basic_services else None)
+                           npdm_sha256=startup.digest(metadata) if basic_services else None, guard_sha256=guard_sha256)
         self.assertFalse(process.exists())
         return json.loads(output.read_text())
 
@@ -185,6 +185,10 @@ const uint64_t sdk_fn_count = 1;
         self.assertEqual(result['exit_code'], 78)
         self.assertEqual(result['status'], 'startup_stopped')
         self.assertEqual(result['native']['stop_reason'], 'unsupported_host_api')
+
+    def test_worker_rejects_an_unbound_adapter_guard_claim(self):
+        with self.assertRaisesRegex(ValueError, 'callback guards differ'):
+            self.run_worker('sm', basic_services=True, guard_sha256='a' * 64)
 
     def test_basic_graphics_registration_stops_at_device_initialization(self):
         registered = self.run_worker('graphics-registration', basic_services=True)

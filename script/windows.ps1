@@ -15,6 +15,7 @@ param(
     [switch]$ScratchFilesystem,
     [switch]$VulkanVideo,
     [switch]$Window,
+    [string]$CallbackMutexGuards,
     [ValidateRange(1, 8)][int]$Jobs = 8,
     [ValidateSet('1', '2')][string]$OptLevel = '2',
     [string]$Python,
@@ -52,6 +53,7 @@ try {
                 if ($Runtime -eq 'Vulkan') { $modeArgs += @('--vulkan-headless', '--vulkan-adapter', $VulkanAdapter) }
                 if ($VulkanVideo) { $modeArgs += '--vulkan-video' }
                 if ($Window) { $modeArgs += '--vulkan-window' }
+                if ($CallbackMutexGuards) { $modeArgs += @('--callback-mutex-guards', (Resolve-Path -LiteralPath $CallbackMutexGuards).Path) }
                 if ($Romfs) {
                     if ($Runtime -eq 'Kernel' -or !$RomfsProfile) { throw '-Romfs requires BasicServices/Vulkan and -RomfsProfile' }
                     $modeArgs += @('--romfs', (Resolve-Path -LiteralPath $Romfs).Path, '--romfs-profile', (Resolve-Path -LiteralPath $RomfsProfile).Path)

@@ -13,6 +13,7 @@ records are kept outside this documentation tree.
 | Plan shared compiler and host interfaces | [Architecture roadmap](architecture-roadmap.md) |
 | Review CPU semantics and gaps | [CPU validation](cpu-validation.md) |
 | Load modules and start guest services | [Loading](loading.md), [initialization and threads](startup.md) |
+| Bind a diagnosed completion callback to its guest mutex | [Adapter callback guards](callback-guards.md) |
 | Work on graphics and shader preparation | [Graphics bridge](graphics.md), [shader preparation](shader-preparation.md) |
 | Transfer older work safely | [Migration notes](migration.md) |
 | Review provenance and references | [Third-party notices](../THIRD_PARTY_NOTICES.md), [emulator reference assessment](emulator-references.md) |

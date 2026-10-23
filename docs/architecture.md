@@ -48,6 +48,7 @@ not an iOS deployment model. See [Apple's code-signing documentation](https://su
 | `runtime/vulkan_host.*`, `runtime/vulkan_windows.*`, `runtime/vulkan_runtime.*`, `runtime/vulkan_render.*` | Offscreen Windows Vulkan ownership, bounded transfers and color-attachment execution/readback |
 | `runtime/vulkan_*.inc`, `runtime/vulkan_bridge.c`, `runtime/vulkan_display.*` | Checked NVN resources, command snapshots/replay and offscreen VI events |
 | `runtime/window.h`, `runtime/window_windows.c` | Optional Windows UI thread, owned RGBA readback copies, scaled preview and closure |
+| `tools/callback_guards.py`, `runtime/callback_guard.*` | Explicit fingerprinted adapter bindings around completion callbacks using compiled guest mutex helpers |
 | `runtime/audio_headless.c`, `runtime/filesystem_windows.c` | Silent AudioRenderer timing and per-run scratch filesystems for initialization |
 | `tools/*shaders.py` | Local shader extraction, translation and cache identity |
 | `runtime/kernel.c`, `runtime/threads.c` | Memory, handles, threads, events, mutexes and condition waits |

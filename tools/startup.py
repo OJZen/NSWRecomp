@@ -135,7 +135,7 @@ def native_report(stdout, returncode, through, graphics=False):
 
 
 def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_only=False,
-           basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_window=False):
+           basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_window=False, guard_sha256=''):
     if vulkan_window and not vulkan:
         raise ValueError('Windows preview requires the Vulkan backend')
     if vulkan and (os.name != 'nt' or not basic_services or kernel_only):
@@ -219,6 +219,8 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_on
     mode = 'vulkan_window' if vulkan_window else 'vulkan_headless' if vulkan else 'kernel_only' if kernel_only else 'basic_services' if basic_services else 'full'
     if native is not None and native.get('runtime_mode') != mode:
         raise ValueError('native service backend differs from the requested runtime')
+    if native is not None and native.get('callback_guards_sha256', '') != guard_sha256:
+        raise ValueError('native callback guards differ from the requested adapter policy')
     status = 'startup_stopped' if result.returncode else 'window_closed' if native.get('window_closed') else 'startup_checkpoint'
     write_json(output, {'status': status,
                        'exit_code': result.returncode, 'through': through, 'native': native,
@@ -231,7 +233,9 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_on
 
 
 def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=False,
-            basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_video=False, vulkan_window=False):
+            basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_video=False, vulkan_window=False, callback_mutex_guards=None):
+    if callback_mutex_guards and (os.name != 'nt' or not basic_services or kernel_only or graphics):
+        raise ValueError('callback mutex guards require Windows basic-services startup')
     if vulkan_window and not vulkan:
         raise ValueError('Windows preview requires the Vulkan backend')
     if kernel_only and basic_services:
@@ -252,6 +256,9 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
         read_policy(exefs / 'main.npdm', npdm_sha256)  # Fail before linking or executing.
     flags = platform_flags(kernel_only, basic_services)
     sources = CORE_SOURCES if kernel_only else BASIC_SOURCES if basic_services else SOURCES
+    if callback_mutex_guards:
+        sources += ('callback_guard.c', 'callback_guard.h')
+        flags += ['-DNSW_CALLBACK_GUARDS', '-I', str(ROOT / 'runtime')]
     if scratch_filesystem:
         sources += ('filesystem_windows.c',)
         flags += ['-DNSW_SCRATCH_FS']
@@ -300,6 +307,16 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
             (temp / 'module_tables.inc').write_text(''.join(f'RT_MODULE({name})\n' for name in build['generation']), encoding='utf-8')
             response = temp / 'link.rsp'
             nvn_sources, nvn_flags, nvn_receipt = [], [], None
+            guard_sources, guard_flags, guard_receipt = [], [], None
+            if callback_mutex_guards:
+                from callback_guards import generate as generate_guards
+                infos = verify(exefs)
+                modules = [Module(name, int(info['base'], 0), Nso(exefs / name)) for name, info in infos.items()]
+                guard_source, guard_flags, guard_receipt = generate_guards(callback_mutex_guards, modules,
+                    {name: info['sha256'] for name, info in infos.items()})
+                guard_file = temp / 'callback_guards.c'; guard_file.write_bytes(guard_source.encode())
+                guard_sources = [str(guard_file)]
+                del modules
             if vulkan:
                 from nvn_bridge import HEADERS as NVN_HEADERS, generate
                 nvn_inputs = ROOT / 'runtime/graphics/nvn'
@@ -332,7 +349,7 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
                        *(['-DNSW_KERNEL_ONLY'] if kernel_only else []), '-I', str(VENDOR / 'runtime'),
                        *(['-DNSW_BASIC_SERVICES'] if basic_services else []),
                        *[str(ROOT / 'runtime' / name) for name in sources if name.endswith('.c')],
-                       *nvn_sources, *map(str, objects), *flags, *nvn_flags, *graphics_flags, '-lm', '-o', str(candidate)]
+                       *nvn_sources, *guard_sources, *map(str, objects), *flags, *guard_flags, *nvn_flags, *graphics_flags, '-lm', '-o', str(candidate)]
             response.write_text(response_args(command) + '\n', encoding='utf-8')
             link = run(response_command(response), cwd=ROOT, log=ROOT / 'work/logs/startup-link.log', seconds=120,
                        rss_limit=(2048 if graphics else 1536) << 20)
@@ -349,6 +366,7 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
             if basic_services: command += ['--basic-services', '--npdm-sha256', npdm_sha256]
             if vulkan: command += ['--vulkan-headless', '--vulkan-adapter', str(adapter)]
             if vulkan_window: command += ['--vulkan-window']
+            if guard_receipt: command += ['--callback-guards-sha256', guard_receipt['config_sha256']]
             execution = run(command,
                             cwd=ROOT, log=ROOT / 'work/logs/startup.log', seconds=seconds + 90,
                             rss_limit=(3072 if graphics else 1536) << 20)
@@ -357,7 +375,8 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
                           runtime_sources={name: digest(ROOT / 'runtime' / name) for name in sources},
                           build_context=build['context'],
                           planner_sha256=digest(Path(__file__)), graphics=graphics_result,
-                          vulkan_headers=vulkan_headers, nvn_bridge=nvn_receipt, vulkan_video=video_dependency)
+                          vulkan_headers=vulkan_headers, nvn_bridge=nvn_receipt, vulkan_video=video_dependency,
+                          callback_mutex_guards=guard_receipt)
             if graphics:
                 result['launcher'] = dict(source_sha256=digest(LAUNCHER_SOURCE),
                                           executable_sha256=digest(APP / 'Contents/MacOS/launch'))
@@ -377,6 +396,8 @@ if __name__ == '__main__':
     parser.add_argument('--basic-services', action='store_true', help='enable basic IPC/application and optional read-only RomFS; no save or audio output')
     parser.add_argument('--vulkan-headless', action='store_true', help='opt into bounded offscreen Windows Vulkan execution with --basic-services')
     parser.add_argument('--vulkan-window', action='store_true', help='show completed --vulkan-headless readbacks in a Windows preview')
+    parser.add_argument('--callback-mutex-guards', type=Path, help='explicit fingerprinted adapter completion-callback mutex bindings')
+    parser.add_argument('--callback-guards-sha256', default='', help=argparse.SUPPRESS)
     parser.add_argument('--vulkan-video', action='store_true', help='enable the movie bridge with prepared Windows libvpx and Vorbis dependencies')
     parser.add_argument('--vulkan-adapter', type=int, choices=range(-1, 32), default=-1, metavar='-1..31')
     parser.add_argument('--npdm-sha256', help='expected SHA-256 of ExeFS/main.npdm; required by --basic-services')
@@ -387,10 +408,10 @@ if __name__ == '__main__':
         if args.worker_result:
             worker(args.exefs, args.through, NATIVE_APP if args.graphics else ROOT / 'work/startup' / native_name('probe'),
                    args.worker_result, args.romfs, args.seconds, args.kernel_only, args.basic_services, args.npdm_sha256,
-                   args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_window)
+                   args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_window, args.callback_guards_sha256)
         else:
             result = startup(args.exefs.resolve(), args.through, args.romfs, args.graphics, args.seconds,
-                             args.kernel_only, args.basic_services, args.npdm_sha256, args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_video, args.vulkan_window)
+                             args.kernel_only, args.basic_services, args.npdm_sha256, args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_video, args.vulkan_window, args.callback_mutex_guards)
             print(json.dumps(result, indent=2))
             if result['exit_code']:
                 parser.exit(2, 'startup stopped before its requested checkpoint; see work/logs/startup.log\n')

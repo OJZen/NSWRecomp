@@ -112,6 +112,9 @@ Windows preview receipts distinguish window creation, accepted frame copies and
 completed UI paints. If fatal reporting finds the presenter lock busy, these
 counters retain their last snapshot as a lower bound rather than blocking the
 watchdog. See the [Windows preview contract](windows.md).
+Optional [adapter callback guards](callback-guards.md) record an embedded
+configuration hash and completed-call count; the worker checks that identity
+against the requested policy before accepting its receipt.
 
 Interface references: [TLR](https://switchbrew.org/wiki/Thread_Local_Region),
 [SVC](https://switchbrew.org/wiki/SVC), [emulator reference assessment](emulator-references.md).
