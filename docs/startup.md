@@ -98,16 +98,20 @@ profiles bind the image fingerprint to every selected ExeFS module. Windows
 checks also cover temporary scratch filesystems and silent audio ownership;
 persistent saves and audible output need separate validation.
 
-The native receipt identifies `kernel_only`, `basic_services`, `vulkan_headless` or `full` runtime
+The native receipt identifies `kernel_only`, `basic_services`, `vulkan_headless`, `vulkan_window` or `full` runtime
 mode. Missing host APIs report `unsupported_host_api`; an unreported exit remains
 `incomplete`. Checkpoint success is assigned only after requested stages and
 shutdown complete. Reaching `nnMain` is distinct from its successful return or
 the creation of a working graphics backend.
 
-Normal AppKit window closure reports `window_closed`, not a successful return
+Normal AppKit or Windows preview closure reports `window_closed`, not a successful return
 from `nnMain` or completion of every initialization stage. Early closure still
 emits a structured report, deduplicated with `atexit`. Automated fields such as
 `title_verified` do not replace separately observed visual evidence.
+Windows preview receipts distinguish window creation, accepted frame copies and
+completed UI paints. If fatal reporting finds the presenter lock busy, these
+counters retain their last snapshot as a lower bound rather than blocking the
+watchdog. See the [Windows preview contract](windows.md).
 
 Interface references: [TLR](https://switchbrew.org/wiki/Thread_Local_Region),
 [SVC](https://switchbrew.org/wiki/SVC), [emulator reference assessment](emulator-references.md).

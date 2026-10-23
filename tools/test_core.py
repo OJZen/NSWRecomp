@@ -15,7 +15,7 @@ from recompile import ROOT, prepare_work
 
 PROJECT_TESTS = ('test_host.py', 'test_host_pipeline.py', 'test_startup_core.py', 'test_npdm.py', 'test_ipc.py',
                  'test_graphics_allocator.py', 'test_nvn_bridge.py', 'test_vulkan_host.py', 'test_vulkan_nvn.py', 'test_vulkan_shaders.py', 'test_time_clock.py', 'test_build.py', 'test_pipeline.py',
-                 'test_load.py', 'test_resources.py', 'test_romfs.py', 'test_filesystem_windows.py', 'test_input.py', 'test_audio_headless.py', 'test_import.py', 'test_repository.py')
+                 'test_load.py', 'test_resources.py', 'test_romfs.py', 'test_filesystem_windows.py', 'test_input.py', 'test_audio_headless.py', 'test_window.py', 'test_import.py', 'test_repository.py')
 
 
 def main():

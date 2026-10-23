@@ -9,6 +9,7 @@
 #include "threads.h"
 #ifdef NSW_VULKAN
 #include "vulkan_runtime.h"
+#include "vulkan_display.h"
 #endif
 #include <errno.h>
 #include <signal.h>
@@ -35,7 +36,7 @@ static atomic_bool constructors_completed, entered_main;
 static atomic_bool window_closed, reported;
 static Cpu cpu;
 #ifdef NSW_VULKAN
-#define RUNTIME_MODE "vulkan_headless"
+#define RUNTIME_MODE (vulkan_display_window_requested() ? "vulkan_window" : "vulkan_headless")
 #elif defined(NSW_KERNEL_ONLY)
 #define RUNTIME_MODE "kernel_only"
 #elif defined(NSW_BASIC_SERVICES)
@@ -46,26 +47,31 @@ static Cpu cpu;
 
 static void report(void) {
     if (atomic_exchange(&reported, true)) return;
+#ifdef NSW_VULKAN
+    HostWindowStats window = vulkan_display_window_stats();
+#endif
     printf("{\"completed_stages\":%u,\"last_stage\":\"%s\",\"function_calls\":%llu,"
            "\"constructors_completed\":%s,\"entered_nnMain\":%s,"
            "\"initialization_executed\":%s,\"window_closed\":%s,\"title_verified\":false,"
-           "\"stop_reason\":\"%s\",\"runtime_mode\":\"" RUNTIME_MODE "\",\"kernel_only\":%s,"
+           "\"stop_reason\":\"%s\",\"runtime_mode\":\"%s\",\"kernel_only\":%s,"
+           "\"window_created\":%s,\"window_frames_submitted\":%llu,\"window_frames_painted\":%llu,"
            "\"vulkan_device_created\":%s,\"vulkan_clear_submissions\":%llu,\"vulkan_readback_pixels\":%llu,\"vulkan_depth_clear_submissions\":%llu,\"vulkan_compute_submissions\":%llu,\"vulkan_shader_draws\":%llu}\n",
            atomic_load(&completed_stages), atomic_load(&stage), (unsigned long long)atomic_load(&calls),
            atomic_load(&constructors_completed) ? "true" : "false", atomic_load(&entered_main) ? "true" : "false",
            atomic_load(&calls) ? "true" : "false", atomic_load(&window_closed) ? "true" : "false",
-           atomic_load(&stop_reason),
+           atomic_load(&stop_reason), RUNTIME_MODE,
 #ifdef NSW_KERNEL_ONLY
            "true",
 #else
            "false",
 #endif
 #ifdef NSW_VULKAN
+           window.created ? "true" : "false", (unsigned long long)window.submitted, (unsigned long long)window.painted,
            vulkan_runtime_device_created() ? "true" : "false",
            (unsigned long long)vulkan_runtime_clear_count(), (unsigned long long)vulkan_runtime_readback_pixels(),
            (unsigned long long)vulkan_runtime_depth_clear_count(), (unsigned long long)vulkan_runtime_dispatch_count(), (unsigned long long)vulkan_runtime_draw_count()
 #else
-           "false", 0ull, 0ull, 0ull, 0ull, 0ull
+           "false", 0ull, 0ull, "false", 0ull, 0ull, 0ull, 0ull, 0ull
 #endif
            );
 }

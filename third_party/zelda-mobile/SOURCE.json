@@ -121,7 +121,7 @@
       "adapted_as": "runtime/graphics/nvn/hle_nvn.c",
       "license": "MIT",
       "local_adaptations": {
-        "note": "Windows Vulkan resources and state setters adapt the MIT NVN subset. Local additions provide checked memory, immutable commands, bounded exact-source shader packets, image/depth operations, compute and indexed draws with standard blending and offscreen frame readback. Desktop presentation remains separate.",
+        "note": "Windows Vulkan resources and state setters adapt the MIT NVN subset. Local additions provide checked memory, immutable commands, bounded exact-source shader packets, image/depth operations, compute and indexed draws with standard blending and offscreen frame readback. An optional Win32 preview copies completed RGBA8 readbacks; GPU swapchain presentation remains separate.",
         "lf_sha256": {
           "runtime/vulkan_bridge.c": "8676f0eb7e2f08550853c7aa85ca8c448d8b80fbfc730b1f899ae92f1bb9ffe5",
           "runtime/vulkan_nvn.inc": "33914c7065cf3298ae89fb2d05686ef44204142be612bb46d83e4d98271f9ed6",
@@ -131,8 +131,8 @@
           "runtime/vulkan_descriptor.inc": "9671fc57fa1d55d5942473d46d8a807e0796fa46962cfcb955474062f5cbc04b",
           "runtime/vulkan_program.inc": "0ddd1ffac08344de8ebe00af49140e7d73aa330191546a8cdf34165deb29fc7c",
           "runtime/vulkan_state.inc": "295e3c3e2ad398aea333cc7df0435cc2d062b6f9db682d22934233ebd23b4fbd",
-          "runtime/vulkan_commands.inc": "9d611d9ee4c1ab1c7b9e6da44d3d87055727aa0baa3c239c5daf69519140712c",
-          "tests/native_vulkan_nvn.c": "40dbc6f184c9e92299d8ad75e55315ff9effd3e520f254a8864826274ed97a3c",
+          "runtime/vulkan_commands.inc": "a0d14a5915f3f4905a44cdac635c025afd5de6ef7b71f200ab6436e18d7c1994",
+          "tests/native_vulkan_nvn.c": "9275bde8f38a52fff18bc8857e37067b0da9602ddcee8c2f57274a5e5529fe5b",
           "tests/test_vulkan_nvn.py": "cd4d627c75cc17d3a709ee131bbc1d5d2d2709ecb2083ee07da1c105b9fe2d0a",
           "runtime/vulkan_shader_capture.inc": "487cb633dcc351534e516aa9f32a8da0301bd730a4681ddae9b3d76fd7f280b9",
           "runtime/vulkan_shader.inc": "3e1cae69f098d1a82901f9d75c142797fa1d0700e94be6458febe4097ff8d8af",

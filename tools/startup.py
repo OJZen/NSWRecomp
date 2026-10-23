@@ -29,6 +29,7 @@ BASIC_SOURCES = (*CORE_SOURCES, 'services.c', 'services.h', 'filesystem.h', 'aud
 SOURCES = (*BASIC_SOURCES, 'filesystem.c', 'audio.c',
            'audio_mixer.c', 'audio_mixer.h', 'audio_voice.h', 'audio_output.inc', 'audio_effects.inc')
 VULKAN_SOURCES = ('vulkan_host.c', 'vulkan_host.h', 'vulkan_windows.c', 'vulkan_windows.h',
+                  'window_windows.c', 'window.h',
                   'audio_headless.c', 'audio_voice.h', 'audio_out.c',
                   'graphics/tex/nvn_deswizzle.c', 'graphics/tex/nvn_deswizzle.h', 'vulkan_texture_io.inc',
                   'vulkan_render.c', 'vulkan_render.h', 'vulkan_color.h', 'vulkan_shader_capture.inc',
@@ -134,7 +135,9 @@ def native_report(stdout, returncode, through, graphics=False):
 
 
 def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_only=False,
-           basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False):
+           basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_window=False):
+    if vulkan_window and not vulkan:
+        raise ValueError('Windows preview requires the Vulkan backend')
     if vulkan and (os.name != 'nt' or not basic_services or kernel_only):
         raise ValueError('headless Vulkan requires Windows basic-services mode without Metal')
     policy = read_policy(exefs / 'main.npdm', npdm_sha256) if basic_services else None
@@ -165,6 +168,8 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_on
     environment.update(helper_bindings)
     environment.pop('NSW_VULKAN_ADAPTER', None)
     if vulkan: environment['NSW_VULKAN_ADAPTER'] = str(adapter)
+    environment.pop('NSW_VULKAN_WINDOW', None)
+    if vulkan_window: environment['NSW_VULKAN_WINDOW'] = '1'
     environment.pop('NSW_PROGRAM_ID', None)
     if policy is not None:
         environment['NSW_PROGRAM_ID'] = policy['program_id']
@@ -208,10 +213,10 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_on
                     if PROCESS.is_file() and json.loads(PROCESS.read_text(encoding='utf-8')).get('pid') == child.pid: PROCESS.unlink()
             if result.returncode != ADDRESS_UNAVAILABLE:
                 break
-    native = None if timed_out else native_report(result.stdout, result.returncode, through, graphics=executable == NATIVE_APP)
+    native = None if timed_out else native_report(result.stdout, result.returncode, through, graphics=executable == NATIVE_APP or vulkan_window)
     if native is not None and native.get('kernel_only') is not kernel_only:
         raise ValueError('native startup mode differs from the requested runtime')
-    mode = 'vulkan_headless' if vulkan else 'kernel_only' if kernel_only else 'basic_services' if basic_services else 'full'
+    mode = 'vulkan_window' if vulkan_window else 'vulkan_headless' if vulkan else 'kernel_only' if kernel_only else 'basic_services' if basic_services else 'full'
     if native is not None and native.get('runtime_mode') != mode:
         raise ValueError('native service backend differs from the requested runtime')
     status = 'startup_stopped' if result.returncode else 'window_closed' if native.get('window_closed') else 'startup_checkpoint'
@@ -221,11 +226,14 @@ def worker(exefs, through, executable, output, romfs=None, seconds=30, kernel_on
                        'resource': resource, 'kernel_only': kernel_only, 'timed_out': timed_out,
                        'runtime_mode': mode, 'service_policy': policy, 'scratch_filesystem': scratch_filesystem, 'helper_bindings': helper_bindings,
                        'vulkan_adapter_requested': adapter if vulkan else None,
+                       'vulkan_window_requested': vulkan_window,
                        'input_sha256': {name: info['sha256'] for name, info in infos.items()}})
 
 
 def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=False,
-            basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_video=False):
+            basic_services=False, npdm_sha256=None, vulkan=False, adapter=-1, romfs_profile=None, scratch_filesystem=False, vulkan_video=False, vulkan_window=False):
+    if vulkan_window and not vulkan:
+        raise ValueError('Windows preview requires the Vulkan backend')
     if kernel_only and basic_services:
         raise ValueError('choose one startup runtime mode')
     if (kernel_only and (graphics or romfs)) or (basic_services and graphics):
@@ -253,7 +261,7 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
         from vulkan_probe import HEADERS, header_hashes
         vulkan_headers = header_hashes()
         sources += VULKAN_SOURCES
-        flags += ['-DNSW_VULKAN', '-DNSW_HEADLESS_AUDIO', '-I', str(HEADERS / 'include'), '-I', str(ROOT / 'runtime/graphics/include')]
+        flags += ['-DNSW_VULKAN', '-DNSW_HEADLESS_AUDIO', '-luser32', '-lgdi32', '-I', str(HEADERS / 'include'), '-I', str(ROOT / 'runtime/graphics/include')]
     if vulkan_video:
         from prepare_vulkan_video import verified_dependency
         video_dependency, video_flags = verified_dependency()
@@ -340,6 +348,7 @@ def startup(exefs, through, romfs=None, graphics=False, seconds=30, kernel_only=
             if kernel_only: command += ['--kernel-only']
             if basic_services: command += ['--basic-services', '--npdm-sha256', npdm_sha256]
             if vulkan: command += ['--vulkan-headless', '--vulkan-adapter', str(adapter)]
+            if vulkan_window: command += ['--vulkan-window']
             execution = run(command,
                             cwd=ROOT, log=ROOT / 'work/logs/startup.log', seconds=seconds + 90,
                             rss_limit=(3072 if graphics else 1536) << 20)
@@ -367,6 +376,7 @@ if __name__ == '__main__':
     parser.add_argument('--kernel-only', action='store_true', help='run kernel/threads only; stop at IPC, with no filesystem or audio services')
     parser.add_argument('--basic-services', action='store_true', help='enable basic IPC/application and optional read-only RomFS; no save or audio output')
     parser.add_argument('--vulkan-headless', action='store_true', help='opt into bounded offscreen Windows Vulkan execution with --basic-services')
+    parser.add_argument('--vulkan-window', action='store_true', help='show completed --vulkan-headless readbacks in a Windows preview')
     parser.add_argument('--vulkan-video', action='store_true', help='enable the movie bridge with prepared Windows libvpx and Vorbis dependencies')
     parser.add_argument('--vulkan-adapter', type=int, choices=range(-1, 32), default=-1, metavar='-1..31')
     parser.add_argument('--npdm-sha256', help='expected SHA-256 of ExeFS/main.npdm; required by --basic-services')
@@ -377,10 +387,10 @@ if __name__ == '__main__':
         if args.worker_result:
             worker(args.exefs, args.through, NATIVE_APP if args.graphics else ROOT / 'work/startup' / native_name('probe'),
                    args.worker_result, args.romfs, args.seconds, args.kernel_only, args.basic_services, args.npdm_sha256,
-                   args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem)
+                   args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_window)
         else:
             result = startup(args.exefs.resolve(), args.through, args.romfs, args.graphics, args.seconds,
-                             args.kernel_only, args.basic_services, args.npdm_sha256, args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_video)
+                             args.kernel_only, args.basic_services, args.npdm_sha256, args.vulkan_headless, args.vulkan_adapter, args.romfs_profile, args.scratch_filesystem, args.vulkan_video, args.vulkan_window)
             print(json.dumps(result, indent=2))
             if result['exit_code']:
                 parser.exit(2, 'startup stopped before its requested checkpoint; see work/logs/startup.log\n')

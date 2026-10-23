@@ -32,7 +32,7 @@ class VulkanHostTests(unittest.TestCase):
                     self.assertNotIn('runtime error:', result.stderr)
                     self.assertNotIn('ERROR: AddressSanitizer', result.stderr)
 
-    @unittest.skipUnless(os.name == 'nt', 'Windows offscreen VI clock')
+    @unittest.skipUnless(os.name == 'nt', 'Windows VI clock and preview')
     def test_display_lifecycle_and_vsync_callback(self):
         with tempfile.TemporaryDirectory(prefix='vulkan-display-') as td:
             binary = Path(td) / executable('check')
@@ -40,7 +40,8 @@ class VulkanHostTests(unittest.TestCase):
                                      '-Wall', '-Wextra', '-Werror', '-pthread', *cpu_flags(),
                                      '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'runtime/graphics/include'),
                                      '-I', str(ROOT / 'third_party/lasrecomp/runtime'), '-I', str(HEADERS / 'include'),
-                                     str(ROOT / 'tests/native_vulkan_display.c'), '-o', str(binary)],
+                                     str(ROOT / 'tests/native_vulkan_display.c'), str(ROOT / 'runtime/window_windows.c'),
+                                     '-luser32', '-lgdi32', '-o', str(binary)],
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)

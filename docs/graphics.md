@@ -1,8 +1,9 @@
 # Graphics bridge
 
 The application rendering backend connects compiled CPU calls to NVN/Metal and
-AppKit. Windows x86-64 has an offscreen Vulkan bridge for resources, command
-recording, image transfers and bounded compute/shader draws. Its callback and generated NVN ABI checks
+AppKit. Windows x86-64 has a Vulkan bridge for resources, command
+recording, image transfers and bounded compute/shader draws, with an optional
+Win32 preview of completed readbacks. Its callback and generated NVN ABI checks
 use synthetic inputs without a graphics device.
 Synthetic ABI and resource checks, successful command submission, observed
 rendering and gameplay are distinct validation layers; see [status](status.md).
@@ -107,7 +108,13 @@ Timestamp report commands write a host completion timeline in the NVN tick unit
 at replay, after earlier synchronous operations finish. They are not GPU profiling
 queries. VI objects are offscreen tokens with a 60 Hz event; the SDK attachment
 helper is resolved from the selected modules. Offscreen frame completion reads
-the image and releases the acquired buffer ticket. No desktop window is created.
+the image and releases the acquired buffer ticket. With `--vulkan-window`,
+`runtime/window_windows.c` copies the RGBA8 readback into an owned BGRA buffer
+and paints it on a separate Win32 UI thread using GDI. GPU/guest objects never
+cross that boundary. The latest frame replaces older pending frames; accepted
+copies and completed paints have separate counters. The default path remains
+offscreen. This preview does not enable Vulkan WSI or establish presentation
+performance; see the [Windows contract](windows.md).
 The AudioRenderer support advances buffer ownership and events without sound.
 
 The optional `tools/vulkan_probe.py --render-clear` checks linear, sRGB and packed

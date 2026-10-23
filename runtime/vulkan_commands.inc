@@ -470,6 +470,10 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *queue,NVNwindow *window,int index) {
     if(ok) {w->ticket[index]=0; w->presents++;}
     pthread_mutex_unlock(&submit_lock);
     if(!ok) {free(pixels); die("NVN offscreen presentation: %s",error);}
+    bool queued = false;
+    if(!vulkan_display_frame(pixels,bytes,texture->d.width,texture->d.height,&queued,error)) {
+        free(pixels); die("NVN Windows preview: %s",error);
+    }
     size_t varying=0; for(size_t i=4;i<bytes;i+=4) varying+=memcmp(pixels,pixels+i,4)!=0;
     const char *capture=getenv("NSW_VULKAN_CAPTURE");
     if(capture && !strcmp(capture,"1") && w->presents<=8) {char name[64]; snprintf(name,sizeof name,"frame-%llu.rgba",(unsigned long long)w->presents); shader_capture_file(name,pixels,bytes);}
@@ -478,8 +482,8 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *queue,NVNwindow *window,int index) {
         size_t color_varying=0;
         for(size_t i=4;i<bytes;i+=4) color_varying+=memcmp(pixels,pixels+i,3)!=0;
         if(color_varying) {
-            char metadata[256]; int length=snprintf(metadata,sizeof metadata,"{\"frame\":%llu,\"width\":%u,\"height\":%u,\"varying_color_pixels\":%llu,\"displayed\":false}\n",
-                (unsigned long long)w->presents,texture->d.width,texture->d.height,(unsigned long long)color_varying);
+            char metadata[256]; int length=snprintf(metadata,sizeof metadata,"{\"frame\":%llu,\"width\":%u,\"height\":%u,\"varying_color_pixels\":%llu,\"window_queued\":%s}\n",
+                (unsigned long long)w->presents,texture->d.width,texture->d.height,(unsigned long long)color_varying,queued?"true":"false");
             if(length<0 || (size_t)length>=sizeof metadata) die("frame metadata exceeds bound");
             if(!captured_visible) {
                 shader_capture_file("first-visible-frame.rgba",pixels,bytes); shader_capture_file("first-visible-frame.json",metadata,(size_t)length); captured_visible=true;
@@ -490,5 +494,5 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *queue,NVNwindow *window,int index) {
         }
     }
     free(pixels);
-    fprintf(stderr,"NVN offscreen frame completed: frame=%llu %ux%u varying_pixels=%llu displayed=false\n",(unsigned long long)w->presents,texture->d.width,texture->d.height,(unsigned long long)varying);
+    fprintf(stderr,"NVN readback frame completed: frame=%llu %ux%u varying_pixels=%llu window_queued=%s\n",(unsigned long long)w->presents,texture->d.width,texture->d.height,(unsigned long long)varying,queued?"true":"false");
 }

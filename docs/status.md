@@ -1,4 +1,4 @@
-# Current status — 2026-10-23
+# Current status — 2026-10-24
 
 NSWRecomp has an independent development baseline with an initial title adapter
 on **macOS Apple Silicon**. Shared multi-title interfaces and additional host
@@ -10,8 +10,10 @@ Shared graphics allocator/callback and generated NVN ABI checks also pass on
 Windows. The opt-in headless Vulkan path has hardware device/queue creation,
 buffer transfers, color/depth readback, compute and indexed shader-draw evidence,
 with a bounded NVN resource and command bridge. Texture uploads and prepared
-shaders have also produced nonuniform offscreen frame readbacks. Desktop presentation remains
-unimplemented; offscreen shader execution does not establish playable output.
+shaders have also produced nonuniform offscreen frame readbacks. An opt-in Windows
+preview displays completed readbacks with aspect-preserving resize and bounded
+closure. It uses CPU copies and GDI; Vulkan swapchain presentation remains separate.
+Shader execution and a preview window do not establish playable output.
 See [Windows setup and boundaries](windows.md).
 
 ## Evidence boundaries
@@ -20,7 +22,7 @@ See [Windows setup and boundaries](windows.md).
 | --- | --- | --- |
 | Synthetic checks | Compiler and project suites passed during migration | Not a game or cross-platform compatibility result |
 | Windows core | Compiler/Unicorn and synthetic initialization checks pass; memory, threads, IPC, shared clocks, NPDM policy, RomFS, temporary filesystems, allocator/callback, NVN ABI and failure reports have coverage | Services cover a bounded subset; persistent saves, calendar rules, physical input, audio output and gameplay remain separate |
-| Windows Vulkan | Device/queue creation, image transfers, depth/stencil clears, compute buffer writeback and indexed draws with depth sampling/stencil rejection pass on one hardware adapter; NVN recording and failure ownership have synthetic coverage | Bounded formats, shaders and state only; no swapchain or desktop presentation; general texture coherence and other drivers need independent validation |
+| Windows Vulkan | Device/queue creation, image transfers, depth/stencil clears, compute buffer writeback and indexed draws with depth sampling/stencil rejection pass on one hardware adapter; NVN recording and failure ownership have synthetic coverage; synthetic desktop checks cover pixel orientation, resize, frame ownership and closure | Bounded formats, shaders and state only; preview uses CPU readback/GDI, with no Vulkan swapchain; general texture coherence and other drivers need independent validation |
 | Headless support | Offline account, settings, explicit host-font substitution, neutral HID, VI vsync and silent AudioRenderer/AudioOut timing/ownership have synthetic coverage | No network account, original system fonts, physical controller, DSP mixing or sound playback |
 | C compilation and linking | Existing objects were verified and relinked in the new checkout | The known unsupported SDK instruction still produces status 2 |
 | Load-only verification | Module mappings, relocations and compiled entries were checked in the new checkout | No guest initialization or gameplay execution |
@@ -57,7 +59,7 @@ use independent save copies and preserve user progress.
   initialization supports kernel/threads and selected IPC/application services;
   Vulkan command execution is opt-in and supports a bounded shader pipeline.
   Initialization can still stall in guest synchronization. Broader shader/state
-  coverage, texture coherence, desktop presentation and audible output need further work.
+  coverage, texture coherence, direct GPU presentation and audible output need further work.
 - First-use shader work can still stall rendering. Broader coverage needs
   controlled cache conditions and comparable inputs.
 

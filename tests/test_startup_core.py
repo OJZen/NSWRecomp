@@ -255,6 +255,12 @@ const uint64_t sdk_fn_count = 1;
             with self.assertRaisesRegex(ValueError, 'invalid native startup report'):
                 startup.native_report(json.dumps(dict(report, window_closed=value)), 0, 'nnMain', graphics=True)
 
+    def test_preview_requires_explicit_vulkan_selection(self):
+        with self.assertRaisesRegex(ValueError, 'preview requires'):
+            startup.startup(self.root, '_init_libc0', vulkan_window=True)
+        with self.assertRaisesRegex(ValueError, 'preview requires'):
+            startup.worker(self.root, '_init_libc0', self.binary, self.root / 'unused.json', vulkan_window=True)
+
     def test_sync_diagnostics_are_bounded_and_address_filtered(self):
         for address_range, expected in (('0:0x8000000000', 512), ('0:1', 0), ('broken', 0)):
             with self.subTest(address_range=address_range):

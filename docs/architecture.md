@@ -47,6 +47,7 @@ not an iOS deployment model. See [Apple's code-signing documentation](https://su
 | `runtime/time_clock.c`, `runtime/time_clock.h` | Immutable wall/monotonic clock anchor and shared-memory wire layout used by time IPC |
 | `runtime/vulkan_host.*`, `runtime/vulkan_windows.*`, `runtime/vulkan_runtime.*`, `runtime/vulkan_render.*` | Offscreen Windows Vulkan ownership, bounded transfers and color-attachment execution/readback |
 | `runtime/vulkan_*.inc`, `runtime/vulkan_bridge.c`, `runtime/vulkan_display.*` | Checked NVN resources, command snapshots/replay and offscreen VI events |
+| `runtime/window.h`, `runtime/window_windows.c` | Optional Windows UI thread, owned RGBA readback copies, scaled preview and closure |
 | `runtime/audio_headless.c`, `runtime/filesystem_windows.c` | Silent AudioRenderer timing and per-run scratch filesystems for initialization |
 | `tools/*shaders.py` | Local shader extraction, translation and cache identity |
 | `runtime/kernel.c`, `runtime/threads.c` | Memory, handles, threads, events, mutexes and condition waits |
@@ -70,7 +71,8 @@ the existing CMIF/TIPC/session code and portable initialization handlers, with
 optional verified read-only storage and explicit host-font substitution. Windows
 can also opt into temporary scratch filesystems. Offscreen Vulkan adds bounded
 resources, image transfers, compute and shader draws, plus silent audio timing.
-Unsupported operations stop explicitly; desktop presentation, persistent storage
+An opt-in Win32 preview paints completed readbacks through GDI.
+Unsupported operations stop explicitly; direct GPU presentation, persistent storage
 and audible output require separate work.
 See [Windows contracts](windows.md).
 

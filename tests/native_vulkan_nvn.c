@@ -40,6 +40,9 @@ bool vulkan_runtime_pixels(VulkanTarget *t,bool u,void *p,size_t n,char e[256]) 
 bool vulkan_runtime_copy(VulkanTarget *s,VulkanTarget *d,bool l,void *p,size_t n,char e[256]) {(void)s;(void)d;(void)l;(void)p;(void)n;(void)e; abort();}
 bool vulkan_runtime_compute(const uint32_t *s,size_t n,const uint32_t g[3],const VulkanComputeBuffer *b,unsigned c,char e[256]) {(void)s;(void)n;(void)g;(void)b;(void)c;(void)e; abort();}
 bool vulkan_display_native(const void *token) {return token==(void *)1;}
+bool vulkan_display_frame(const void *p,size_t n,uint32_t w,uint32_t h,bool *q,char e[256]) {
+    (void)p;(void)n;(void)w;(void)h;(void)q;(void)e; abort();
+}
 VulkanTarget *vulkan_runtime_target(uint32_t width,uint32_t height,VulkanColorFormat format,char error[256]) {
     (void)error; assert(width==16 && height==8 && !created); color_format=format; created++; return (VulkanTarget *)1;
 }

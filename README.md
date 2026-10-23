@@ -8,9 +8,9 @@ Development moved from `totk-recomp` into this repository. The application platf
 is **macOS on Apple Silicon**. **Windows x86-64** supports the native build,
 load-only, isolated CPU checks and bounded initialization with basic IPC services
 and optional read-only RomFS storage and temporary scratch filesystems.
-An optional headless Vulkan path supports bounded NVN resource/command recording,
+An optional Vulkan path supports bounded NVN resource/command recording,
 image transfers, depth/stencil clears, compute dispatch and shader draws with
-offscreen readback; see the
+offscreen readback and a Windows preview window; see the
 [Windows guide](docs/windows.md).
 Additional adapters and host backends remain under development.
 See [status and validation boundaries](docs/status.md) before

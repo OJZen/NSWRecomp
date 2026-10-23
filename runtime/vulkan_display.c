@@ -1,4 +1,4 @@
-// Offscreen VI objects for the Vulkan backend. No desktop presentation claim.
+// VI objects and an optional Windows preview of completed Vulkan readbacks.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "vulkan_display.h"
@@ -13,6 +13,46 @@ static atomic_bool running;
 static bool initialized, cleanup_registered;
 static bool display_open, layer_open;
 static int32_t crop[4];
+static pthread_mutex_t preview_lock = PTHREAD_MUTEX_INITIALIZER;
+static HostWindow *preview;
+static atomic_bool preview_created, preview_closed;
+static atomic_uint_fast64_t preview_submitted, preview_painted;
+
+bool vulkan_display_window_requested(void) {
+    const char *value = getenv("NSW_VULKAN_WINDOW");
+    return value && !strcmp(value, "1");
+}
+static HostWindowStats preview_snapshot(void) {
+    HostWindowStats stats = host_window_stats(preview);
+    if (preview) {
+        atomic_store(&preview_created, stats.created); atomic_store(&preview_closed, stats.closed);
+        atomic_store(&preview_submitted, stats.submitted); atomic_store(&preview_painted, stats.painted);
+    }
+    return stats;
+}
+HostWindowStats vulkan_display_window_stats(void) {
+    if (!pthread_mutex_trylock(&preview_lock)) {
+        preview_snapshot(); pthread_mutex_unlock(&preview_lock);
+    }
+    return (HostWindowStats){.created = atomic_load(&preview_created), .closed = atomic_load(&preview_closed),
+        .submitted = atomic_load(&preview_submitted), .painted = atomic_load(&preview_painted)};
+}
+bool vulkan_display_frame(const void *rgba, size_t bytes, uint32_t width, uint32_t height,
+                          bool *queued, char error[256]) {
+    pthread_mutex_lock(&preview_lock);
+    uint64_t before = host_window_stats(preview).submitted;
+    bool ok = !preview || host_window_frame(preview, rgba, bytes, width, height, error);
+    *queued = preview_snapshot().submitted > before;
+    pthread_mutex_unlock(&preview_lock);
+    return ok;
+}
+extern void startup_window_closed(void);
+static void preview_user_closed(void *unused) {
+    (void)unused;
+    startup_window_closed(); // Stops guest threads and emits the distinct close receipt.
+    fflush(stdout); fflush(stderr);
+    _Exit(0); // The guest main thread parks at its safe point until process exit.
+}
 
 static void *tick(void *unused) {
     (void)unused;
@@ -24,6 +64,11 @@ static void *tick(void *unused) {
     return NULL;
 }
 void vulkan_display_shutdown(void) {
+    pthread_mutex_lock(&preview_lock);
+    preview_snapshot();
+    if (!host_window_close(preview)) die("Windows preview did not stop within its shutdown bound");
+    preview = NULL;
+    pthread_mutex_unlock(&preview_lock);
     if (atomic_exchange(&running, false)) pthread_join(ticker, NULL);
     uint64_t regs[31] = {vsync_read}; if (vsync_read) kernel_svc(0x16, regs);
     regs[0] = vsync_write; if (vsync_write) kernel_svc(0x16, regs);
@@ -38,6 +83,13 @@ void hle__ZN2nn2vi10InitializeEv(Cpu *c) {
     (void)c;
     if (initialized) return;
     if (!vulkan_runtime_ready()) die("Display requires Vulkan graphics initialization");
+    if (vulkan_display_window_requested()) {
+        char error[256];
+        pthread_mutex_lock(&preview_lock);
+        bool opened = host_window_open(&preview, 960, 540, preview_user_closed, NULL, error);
+        preview_snapshot(); pthread_mutex_unlock(&preview_lock);
+        if (!opened) { vulkan_display_shutdown(); die("Windows preview: %s", error); }
+    }
     if (!kernel_event_create(&vsync_write, &vsync_read)) die("Cannot allocate the offscreen display event");
     atomic_store(&running, true);
     if (pthread_create(&ticker, NULL, tick, NULL)) {

@@ -2,9 +2,9 @@
 
 Windows supports the native compiler, link-table verification, load-only runtime,
 isolated CPU checks and bounded initialization with selected IPC services. This
-is a console development workflow with an optional offscreen Vulkan backend.
+is a console development workflow with an optional Vulkan backend and preview window.
 Read-only resources, temporary filesystems and bounded NVN compute/shader draws
-are implemented. Desktop presentation, audible output, physical
+are implemented. Direct GPU presentation, audible output, physical
 controllers and gameplay remain separate work; the application frontend uses
 macOS frameworks.
 
@@ -333,8 +333,27 @@ readback. Draws support float vertex attributes, triangle lists/strips/fans,
 uniforms, combined 2D samplers, standard color/alpha blending and read-only
 depth/stencil tests. Dual-source blending, depth writes, compressed/3D textures
 and broader pipeline state still stop explicitly.
-`QueuePresentTexture` completes and releases an offscreen frame; it does not
-display it. Guest transfer memory is validated but not imported into the GPU.
+`QueuePresentTexture` completes and releases an offscreen frame. Guest transfer
+memory is validated but not imported into the GPU.
+
+Add `-Window` to the Vulkan startup command (Python: add `--vulkan-window` to
+`--vulkan-headless`) to display these completed RGBA8 readbacks. This is an
+explicit opt-in: an inherited `NSW_VULKAN_WINDOW` cannot enable a window through
+the launcher. The receipt then uses `runtime_mode: vulkan_window` and records
+`window_created`, `window_frames_submitted` and `window_frames_painted`.
+Frame capture metadata records `window_queued`; only the painted counter confirms
+that the UI completed a draw. Minimized/occluded windows can paint fewer frames
+than the renderer submits, and a repaint of the same frame does not increment it.
+
+The preview owns a Win32 UI thread and one latest BGRA copy (at most 64 MiB per
+frame). GDI scales the completed GPU readback with letterboxing; it is not a
+Vulkan surface/swapchain or a performance result. Resize and minimize/restore
+do not change guest render targets. Closing requests cooperative guest shutdown,
+emits `window_closed` and exits the bounded process; a shutdown failure retains
+a nonzero status. Normal VI finalization closes the preview without reporting
+a user closure. Window startup/join waits are bounded to five seconds.
+The synthetic suite opens owned windows briefly to verify pixel channels,
+orientation, aspect ratio, copied-frame lifetime and both closure paths.
 
 Run the independent hardware checks with Clang on `PATH`:
 
