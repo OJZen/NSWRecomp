@@ -7,7 +7,7 @@ uint64_t nvn_guest_address(const char *);
 void hle_nvnBootstrapLoader(Cpu *);
 static unsigned calls;
 static int unbalanced;
-static unsigned char storage[256];
+static _Alignas(16) unsigned char storage[256];
 _Thread_local Cpu *nvn_bridge_cpu;
 static void synthetic(Cpu *c) { c->x[0] += 3; }
 const NvnBridgeEntry nvn_bridge_entries[] = {{"nvnSynthetic", synthetic}};

@@ -22,12 +22,40 @@ static void sample(uint32_t id) {
     hle__ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj(&c); assert(c.x[0] == 1);
 }
 int main(int argc, char **argv) {
-    (void)argv;
     Cpu c = {0};
-    if (argc > 1) { c.x[0] = 0; c.x[1] = 1; hle__ZN2nn3hid22SetSupportedNpadIdTypeEPKjm(&c); return 99; }
+    if (argc > 1) {
+        if (!strcmp(argv[1], "bad-single-id")) {
+            c.x[0] = (uintptr_t)memory_words; c.x[1] = (uintptr_t)memory_words + sizeof memory_words - 3;
+            hle__ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj(&c);
+        } else if (!strcmp(argv[1], "bad-single-output")) {
+            c.x[0] = (uintptr_t)memory_words + sizeof memory_words - 39; c.x[1] = (uintptr_t)(memory_words + 16);
+            hle__ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj(&c);
+        } else { c.x[0] = 0; c.x[1] = 1; hle__ZN2nn3hid22SetSupportedNpadIdTypeEPKjm(&c); }
+        return 99;
+    }
     memory_words[5] = 0xfeedface;
     hle__ZN2nn3hid14InitializeNpadEv(&c);
     sample(0); assert(memory_words[0] && !memory_words[1] && memory_words[4] == 3);
+    void (*single[])(Cpu *) = {
+        hle__ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj,
+        hle__ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj,
+        hle__ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj,
+        hle__ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj,
+        hle__ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj,
+    };
+    for (unsigned i = 0; i < sizeof single / sizeof *single; i++) {
+        uint64_t previous = memory_words[0];
+        input_key(7, 1); input_key(7, 0);
+        c.x[0] = (uintptr_t)memory_words; c.x[1] = (uintptr_t)(memory_words + 16); c.x[2] = 0;
+        c.x[19] = 0x12345678;
+        single[i](&c);
+        assert(memory_words[0] > previous && memory_words[1] == (i == 0));
+        assert(memory_words[4] == (i == 0 ? 3 : 0) && memory_words[5] == 0xfeedface);
+        assert(c.x[19] == 0x12345678);
+        input_clear();
+    }
+    memory_words[16] = 2; c.x[0] = (uintptr_t)memory_words; c.x[1] = (uintptr_t)(memory_words + 16);
+    single[0](&c); assert(!memory_words[4]); sample(0);
     uint64_t first = memory_words[0];
     input_key(7, 1); input_key(7, 0); sample(0);
     assert(memory_words[0] > first && memory_words[1] == 1);

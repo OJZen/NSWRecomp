@@ -36,7 +36,7 @@ typedef struct {
     uint64_t serial;                     // 初始化序号：回放层按它在宿主表里找 MTLTexture（游戏可能按值拷贝对象，不能存对象指针） | Initialization serial: the replay layer uses it to find the MTLTexture in the host table (the game may copy the object by value, so object pointers cannot be stored)
 } tex_t;                                                                                     FITS(tex_t, NVNtexture);
 typedef struct {
-    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1;
+    uint8_t set_levels : 1, set_layers : 1, set_format : 1, set_target : 1, set_depth_mode : 1, depth_mode : 1;
     int8_t base_level, nlevels;
     uint8_t format, target;
     uint16_t swizzle;

@@ -4,15 +4,24 @@ An experimental Switch ARM64 static recompilation toolkit and runtime, designed
 for multiple title adapters and host platforms. It translates user-supplied ARM64
 executables into C and connects the compiled code to a host runtime.
 
-Development moved from `totk-recomp` into this repository. The current platform
-is **macOS on Apple Silicon**; additional adapters and platforms remain under
-development. See [status and validation boundaries](docs/status.md) before
+Development moved from `totk-recomp` into this repository. The application platform
+is **macOS on Apple Silicon**. **Windows x86-64** supports the native build,
+load-only, isolated CPU checks and bounded initialization with basic IPC services
+and optional read-only RomFS storage and temporary scratch filesystems.
+An optional headless Vulkan path supports bounded NVN resource/command recording,
+image transfers, depth/stencil clears, compute dispatch and shader draws with
+offscreen readback; see the
+[Windows guide](docs/windows.md).
+Additional adapters and host backends remain under development.
+See [status and validation boundaries](docs/status.md) before
 interpreting build or runtime results as compatibility claims.
 
 ## Getting started
 
 Use Python 3.14 or later. The current validation toolchain uses Apple Clang 21.
 Keep temporary files and caches on the same volume as the repository.
+Windows users should use the PowerShell setup and LLVM MinGW toolchain in the
+[Windows guide](docs/windows.md); the commands below describe macOS.
 
 ```sh
 mkdir -p work/tmp

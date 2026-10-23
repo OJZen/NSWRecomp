@@ -2,6 +2,7 @@
 #include "input.h"
 #include "dispatch.h"
 #include "host_compat.h"
+#include "services.h"
 #include <math.h>
 
 typedef struct { uint64_t sampling, buttons; int32_t lx, ly, rx, ry; uint32_t attributes, reserved; } PadState;
@@ -12,6 +13,9 @@ static uint64_t sampling, latched;
 static PadState controller;
 static uint64_t controller_latched;
 static uint32_t styles = 1, enabled = 1;
+// Standalone input checks can omit the IPC event host.
+__attribute__((weak)) void service_hid_style_changed(unsigned id) { (void)id; }
+__attribute__((weak)) void service_hid_hold_changed(unsigned value) { (void)value; }
 static const struct { unsigned key, bit; } mapping[] = {
     {7,0}, {6,1}, {15,2}, {3,3}, {8,4}, {9,5}, {12,6}, {14,7},
     {56,8}, {49,9}, {36,10}, {48,11}, {123,12}, {126,13}, {124,14}, {125,15},
@@ -56,9 +60,11 @@ void hle__ZN2nn3hid22SetSupportedNpadIdTypeEPKjm(Cpu *c) {
     pthread_mutex_lock(&lock); enabled = 0;
     for (uint64_t i = 0; i < c->x[1]; i++) if (!LD32(c->x[0] + i * 4)) enabled = 1;
     pthread_mutex_unlock(&lock);
+    service_hid_style_changed(0);
 }
 void hle__ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE(Cpu *c) {
     pthread_mutex_lock(&lock); styles = (uint32_t)c->x[0]; pthread_mutex_unlock(&lock);
+    service_hid_style_changed(0);
 }
 void hle__ZN2nn3hid15GetNpadStyleSetERKj(Cpu *c) {
     memory(c->x[0], 4, 1); uint32_t id = LD32(c->x[0]);
@@ -87,10 +93,25 @@ PAD(_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj, 2)
 PAD(_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj, 4)
 PAD(_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj, 8)
 PAD(_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj, 16)
-void hle__ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE(Cpu *c) { (void)c; /* FullKey has no detachable halves. */ }
+// The single-state overload takes the ID reference in x1, with no count.
+// Keep it on the same host-owned input path as the bulk overloads.
+static void single_state(Cpu *c, unsigned style) {
+    c->x[2] = c->x[1]; c->x[1] = 1; states(c, style);
+}
+#define SINGLE_PAD(symbol, style) void hle_##symbol(Cpu *c) { single_state(c, style); }
+SINGLE_PAD(_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj, 1)
+SINGLE_PAD(_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj, 2)
+SINGLE_PAD(_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj, 4)
+SINGLE_PAD(_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj, 8)
+SINGLE_PAD(_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj, 16)
+void hle__ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE(Cpu *c) {
+    if (c->x[0] > 1) die("Invalid Npad hold type");
+    service_hid_hold_changed((unsigned)c->x[0]);
+}
 void hle__ZN2nn3hid14DisconnectNpadERKj(Cpu *c) {
     memory(c->x[0], 4, 1); uint32_t id = LD32(c->x[0]);
     pthread_mutex_lock(&lock); if (!id) enabled = 0; pthread_mutex_unlock(&lock);
+    if (!id) service_hid_style_changed(0);
 }
 // Motion and vibration are not exposed by this input adapter.
 void hle__ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE(Cpu *c) { c->x[0] = 0; }

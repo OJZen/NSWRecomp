@@ -13,4 +13,6 @@ int zelda_video_decode(zelda_video *video, const void *data, size_t size);
 // Writes the next decoded frame as NV12 (Y rows, then interleaved UV rows; stride = width) and reports its size.
 // Returns 1 for a frame, 0 when none is pending, negative when it does not fit or is not 8-bit 4:2:0.
 int zelda_video_frame(zelda_video *video, uint8_t *nv12, size_t capacity, int *width, int *height);
+// Texture-output alternative: RGBA8 using the frame's YCbCr matrix and range.
+int zelda_video_frame_rgba(zelda_video *video, uint8_t *rgba, size_t capacity, int *width, int *height);
 size_t zelda_video_nv12_size(int width, int height);

@@ -8,6 +8,7 @@ records are kept outside this documentation tree.
 | Task | Guide |
 | --- | --- |
 | Set up the current adapter | [Adapter setup](totk.md), [control panel and input](control-panel.md) |
+| Build and validate the Windows core | [Windows x86-64 pipeline](windows.md) |
 | Understand the implementation | [Architecture](architecture.md) |
 | Plan shared compiler and host interfaces | [Architecture roadmap](architecture-roadmap.md) |
 | Review CPU semantics and gaps | [CPU validation](cpu-validation.md) |

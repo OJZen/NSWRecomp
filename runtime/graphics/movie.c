@@ -22,6 +22,7 @@
 #include "movie.h"
 #include "threads.h"
 #include "movie_video.h"
+#include "movie_audio.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -30,14 +31,16 @@
 #include <time.h>
 
 enum { ST_OK = 0, ST_FAILED = 0x1001, ST_TRY_AGAIN = 0x1008 }; // movie::Status: the game tests only for non-zero.
-enum { FLAG_EOS = 4, TYPE_VP8 = 2, TYPE_VP9 = 3, OUTPUT_NV12 = 4 };
+enum { FLAG_EOS = 4, TYPE_VP8 = 2, TYPE_VP9 = 3, TYPE_VORBIS = 5, OUTPUT_PCM16 = 1, OUTPUT_TEXTURE = 3, OUTPUT_NV12 = 4 };
 enum { INPUTS = 4, OUTPUTS = 8, INPUT_CAPACITY = 4 << 20, STACK = 512 << 10 };
 enum { FREE, ACQUIRED, QUEUED, READY };
 
 typedef struct {
     pthread_mutex_t lock; pthread_cond_t wake, idle;
     void *events[4]; // input available, output available, output format changed, error
-    int type, priority, width, height, announced_width, announced_height;
+    int type, priority, width, height, announced_width, announced_height, texture_output;
+    int sample_rate, channels;
+    movie_audio *audio;
     zelda_video *video;
     uint8_t *input[INPUTS]; int input_state[INPUTS];
     struct { int index, offset, size; int64_t pts; uint32_t flags; } queue[INPUTS]; int queue_head, queue_count;
@@ -55,7 +58,7 @@ static _Thread_local Cpu *movie_cpu;
 uint64_t graphics_guest_export(const char *name);
 static struct {
     uint64_t signal, create_thread, start_thread, wait_thread, destroy_thread, release;
-    uint64_t set_data, set_range, base, capacity, offset, find_int32, set_int32, set_rect, set_string;
+    uint64_t set_data, set_range, base, capacity, offset, size, find_int32, find_string, find_buffer, set_int32, set_rect, set_string;
 } sdk;
 static struct { uint64_t alloc, free, user; } allocator;
 static pthread_once_t sdk_once = PTHREAD_ONCE_INIT;
@@ -89,6 +92,9 @@ static void resolve(void) { // First decoder construction, on the game's movie t
     sdk.base = symbol("_ZNK5movie6Buffer4BaseEv");
     sdk.capacity = symbol("_ZNK5movie6Buffer8CapacityEv");
     sdk.offset = symbol("_ZNK5movie6Buffer6OffsetEv");
+    sdk.size = symbol("_ZNK5movie6Buffer4SizeEv");
+    sdk.find_string = symbol("_ZNK5movie9MediaData10FindStringEPKcPS2_");
+    sdk.find_buffer = symbol("_ZNK5movie9MediaData10FindBufferEPKcPPNS_6BufferE");
     sdk.find_int32 = symbol("_ZNK5movie9MediaData9FindInt32EPKcPi");
     sdk.set_int32 = symbol("_ZN5movie9MediaData8SetInt32EPKci");
     sdk.set_rect = symbol("_ZN5movie9MediaData7SetRectEPKciiii");
@@ -134,24 +140,32 @@ static void worker(void *argument) {
         m->busy = 1;
         pthread_mutex_unlock(&m->lock);
         uint64_t start = monotonic_ns();
-        int status = zelda_video_decode(m->video, job.size ? m->input[job.index] + job.offset : NULL, (size_t)job.size);
+        const void *input = job.size ? m->input[job.index] + job.offset : NULL;
+        int status = m->audio ? movie_audio_decode(m->audio, input, (size_t)job.size) :
+                               zelda_video_decode(m->video, input, (size_t)job.size);
         uint64_t spent = monotonic_ns() - start; // decode and conversion only, not the wait for a free output slot
         pthread_mutex_lock(&m->lock);
         if (status) { m->last_error = ST_FAILED; fprintf(stderr, "MOVIE decode error pts=%lld size=%d\n", (long long)job.pts, job.size); }
         int changed = 0, produced = 0;
         for (;;) {
+            if (status) break;
             int slot = claim_output(m, generation, &m->flushes);
             if (slot < 0) break;
             int width = 0, height = 0;
             pthread_mutex_unlock(&m->lock);
             uint64_t convert = monotonic_ns();
-            int frame = zelda_video_frame(m->video, m->output[slot], m->output_capacity, &width, &height);
+            size_t frame_bytes=0;
+            int frame = m->audio ? movie_audio_frame(m->audio, m->output[slot], m->output_capacity, &frame_bytes) :
+                m->texture_output ? zelda_video_frame_rgba(m->video, m->output[slot], m->output_capacity, &width, &height) :
+                zelda_video_frame(m->video, m->output[slot], m->output_capacity, &width, &height);
             spent += monotonic_ns() - convert;
             pthread_mutex_lock(&m->lock);
-            if (frame < 0) die("movie: decoded frame %dx%d does not fit the configured %dx%d NV12 output", width, height, m->width, m->height);
+            if (frame < 0) die("movie: decoded frame %dx%d is incompatible with configured %dx%d output", width, height, m->width, m->height);
             if (!frame) break;
+            if (m->type==TYPE_VORBIS && !m->frames) changed=1;
             if (width != m->announced_width || height != m->announced_height) { m->announced_width = width; m->announced_height = height; changed = 1; }
-            publish(m, slot, zelda_video_nv12_size(width, height), job.pts, 0);
+            if(m->type!=TYPE_VORBIS) frame_bytes=m->texture_output ? (size_t)width * height * 4 : zelda_video_nv12_size(width,height);
+            publish(m, slot, frame_bytes, job.pts, 0);
             produced++; m->frames++;
         }
         m->decode_ns += spent;
@@ -175,6 +189,11 @@ static void worker(void *argument) {
 }
 
 static void fill_format(movie_decoder *m, void *media) {
+    if(m->type==TYPE_VORBIS) {
+        INVOKE(sdk.set_string,(uintptr_t)media,(uintptr_t)"mime",(uintptr_t)"audio/raw");
+        INVOKE(sdk.set_int32,(uintptr_t)media,(uintptr_t)"sample-rate",m->sample_rate);
+        INVOKE(sdk.set_int32,(uintptr_t)media,(uintptr_t)"channel-count",m->channels); return;
+    }
     int width = m->announced_width ? m->announced_width : m->width, height = m->announced_height ? m->announced_height : m->height;
     INVOKE(sdk.set_string, (uintptr_t)media, (uintptr_t)"mime", (uintptr_t)(m->type == TYPE_VP9 ? "video/x-vnd.on2.vp9" : "video/x-vnd.on2.vp8"));
     INVOKE(sdk.set_int32, (uintptr_t)media, (uintptr_t)"width", width); INVOKE(sdk.set_int32, (uintptr_t)media, (uintptr_t)"height", height);
@@ -190,6 +209,7 @@ static void flush_locked(movie_decoder *m) {
     for (int i = 0; i < INPUTS; i++) m->input_state[i] = FREE;
     for (int i = 0; i < OUTPUTS; i++) m->output_state[i] = FREE;
     m->queue_head = m->queue_count = m->ready_head = m->ready_count = 0; m->ended = 0;
+    if (m->audio && movie_audio_reset(m->audio)) die("movie: Vorbis decoder restart failed");
     if (m->video) {
         zelda_video_close(m->video);
         if (!(m->video = zelda_video_open(m->type, 4))) die("movie: decoder restart failed");
@@ -204,6 +224,7 @@ static void destroy(void *self) {
     pthread_mutex_unlock(&m->lock);
     if (m->thread_created) { INVOKE(sdk.wait_thread, (uintptr_t)m->thread); INVOKE(sdk.destroy_thread, (uintptr_t)m->thread); }
     zelda_video_close(m->video);
+    movie_audio_close(m->audio);
     for (int i = 0; i < INPUTS; i++) if (m->input[i]) INVOKE(allocator.free, (uintptr_t)m->input[i], allocator.user);
     for (int i = 0; i < OUTPUTS; i++) free(m->output[i]);
     if (m->stack) INVOKE(allocator.free, (uintptr_t)m->stack, allocator.user);
@@ -218,19 +239,45 @@ static void decoder_delete(void *self) { destroy(self); INVOKE(sdk.release, (uin
 static int configure(void *self, void *media) {
     movie_decoder *m = M(self);
     int width = 0, height = 0;
-    if (!(INVOKE(sdk.find_int32, (uintptr_t)media, (uintptr_t)"width", (uintptr_t)&width) & 1) || !(INVOKE(sdk.find_int32, (uintptr_t)media, (uintptr_t)"height", (uintptr_t)&height) & 1) || width <= 0 || height <= 0 || width > 8192 || height > 8192)
+    if (m->type!=TYPE_VORBIS && (!(INVOKE(sdk.find_int32, (uintptr_t)media, (uintptr_t)"width", (uintptr_t)&width) & 1) || !(INVOKE(sdk.find_int32, (uintptr_t)media, (uintptr_t)"height", (uintptr_t)&height) & 1) || width <= 0 || height <= 0 || width > 8192 || height > 8192))
         die("movie: track format has no usable width/height");
     pthread_mutex_lock(&m->lock);
-    if (m->video) { pthread_mutex_unlock(&m->lock); return ST_FAILED; }
+    if (m->video || m->audio) { pthread_mutex_unlock(&m->lock); return ST_FAILED; }
     m->width = width; m->height = height;
-    m->output_capacity = zelda_video_nv12_size(width, height);
-    if (!(m->video = zelda_video_open(m->type, 4))) die("movie: libvpx decoder unavailable for type %d", m->type);
+    if(m->type==TYPE_VORBIS) {
+        const char *mime = NULL;
+        bool has_mime = INVOKE(sdk.find_string,(uintptr_t)media,(uintptr_t)"mime",(uintptr_t)&mime) & 1;
+        bool has_rate = INVOKE(sdk.find_int32,(uintptr_t)media,(uintptr_t)"sample-rate",(uintptr_t)&m->sample_rate) & 1;
+        bool has_channels = INVOKE(sdk.find_int32,(uintptr_t)media,(uintptr_t)"channel-count",(uintptr_t)&m->channels) & 1;
+        if (!has_mime || !mime || !kernel_access((uintptr_t)mime,13,1) || memcmp(mime,"audio/vorbis",13) ||
+            !has_rate || !has_channels || m->sample_rate<8000 || m->sample_rate>192000 || m->channels<1 || m->channels>8)
+            die("movie: unsupported Vorbis track rate=%d channels=%d",m->sample_rate,m->channels);
+        const char *keys[] = {"csd-0", "csd-1"};
+        const void *headers[2]; size_t sizes[2];
+        for (unsigned i=0; i<2; i++) {
+            void *buffer = NULL;
+            if (!(INVOKE(sdk.find_buffer,(uintptr_t)media,(uintptr_t)keys[i],(uintptr_t)&buffer)&1) || !buffer)
+                die("movie: missing Vorbis %s",keys[i]);
+            uintptr_t base = INVOKE(sdk.base,(uintptr_t)buffer);
+            size_t capacity = INVOKE(sdk.capacity,(uintptr_t)buffer);
+            int offset = (int)INVOKE(sdk.offset,(uintptr_t)buffer), size = (int)INVOKE(sdk.size,(uintptr_t)buffer);
+            if (offset<0 || size<=0 || size>(1<<20) || (size_t)offset>capacity || (size_t)size>capacity-(size_t)offset ||
+                base>UINTPTR_MAX-(size_t)offset || !kernel_access(base+(size_t)offset,(size_t)size,1))
+                die("movie: invalid Vorbis %s buffer",keys[i]);
+            headers[i] = (const void *)(base+(size_t)offset); sizes[i] = (size_t)size;
+        }
+        m->audio = movie_audio_open(headers[0],sizes[0],headers[1],sizes[1],m->sample_rate,m->channels);
+        if (!m->audio) die("movie: Vorbis headers rejected");
+        m->output_capacity = (size_t)8192*m->channels*2;
+    } else m->output_capacity = m->texture_output ? (size_t)width * height * 4 : zelda_video_nv12_size(width, height);
+    if (m->output_capacity > (128u << 20) / OUTPUTS) die("movie: output buffers exceed the 128 MiB bound");
+    if (m->type!=TYPE_VORBIS && !(m->video = zelda_video_open(m->type, 4))) die("movie: libvpx decoder unavailable for type %d", m->type);
     // Extractor reads and SDK synchronization validate these buffers against the guest memory map.
     for (int i = 0; i < INPUTS; i++)
         if (!(m->input[i] = (void *)(uintptr_t)INVOKE(allocator.alloc, INPUT_CAPACITY, 16, allocator.user))) die("movie: input buffer allocation failed");
     for (int i = 0; i < OUTPUTS; i++) if (!(m->output[i] = malloc(m->output_capacity))) die("movie: output buffer allocation failed");
     pthread_mutex_unlock(&m->lock);
-    fprintf(stderr, "MOVIE configure codec=%s %dx%d inputs=%d outputs=%d\n", m->type == TYPE_VP9 ? "vp9" : "vp8", width, height, INPUTS, OUTPUTS);
+    fprintf(stderr, "MOVIE configure codec=%s %dx%d rate=%d channels=%d inputs=%d outputs=%d\n", m->type==TYPE_VORBIS?"vorbis":m->type==TYPE_VP9?"vp9":"vp8", width, height,m->sample_rate,m->channels, INPUTS, OUTPUTS);
     return ST_OK;
 }
 static int register_events(void *self, void **events) { memcpy(M(self)->events, events, sizeof M(self)->events); return ST_OK; }
@@ -242,7 +289,7 @@ static int output_format(void *self, void *media) {
 static int start(void *self) {
     movie_decoder *m = M(self);
     pthread_mutex_lock(&m->lock);
-    if (!m->video) { pthread_mutex_unlock(&m->lock); return ST_FAILED; }
+    if (!m->video && !m->audio) { pthread_mutex_unlock(&m->lock); return ST_FAILED; }
     m->started = 1;
     if (!m->thread_created) {
         // A guest thread, so the worker can signal the game's nn::os events.
@@ -321,6 +368,18 @@ static int output_buffer(void *self, int index, void *buffer) {
     if (!acquired(m, index)) return ST_FAILED;
     size_t size = m->output_size[index], offset = (size_t)INVOKE(sdk.offset, (uintptr_t)buffer);
     size_t capacity = INVOKE(sdk.capacity, (uintptr_t)buffer);
+#ifdef NSW_VULKAN_VIDEO
+    if (m->texture_output) {
+        uint64_t address = INVOKE(sdk.base, (uintptr_t)buffer);
+        if (offset || capacity != sizeof(uint64_t) || !kernel_access(address, sizeof(uint64_t), 1) || !size) return ST_FAILED;
+        // Buffer::Base is the opaque NVN texture object itself. Its first word
+        // is backend-specific storage, not another guest texture pointer.
+        void *texture = (void *)(uintptr_t)address;
+        unsigned width = m->announced_width ? m->announced_width : m->width, height = m->announced_height ? m->announced_height : m->height;
+        if (size != (size_t)width * height * 4 || !movie_write_rgba(texture, m->output[index], width, height)) return ST_FAILED;
+        return ST_OK;
+    }
+#endif
     if (offset > capacity || size > capacity - offset) return ST_FAILED;
     uint8_t *destination = (uint8_t *)INVOKE(sdk.base, (uintptr_t)buffer) + offset;
     // The destination is the game's texture memory; let the dirty-page tracker see the host write.
@@ -409,12 +468,17 @@ void hle__ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_(Cpu *c) {
 void hle__ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi(Cpu *c) {
     pthread_once(&sdk_once, resolve);
     int type = (int)c->x[1], output = (int)c->x[2], mode = (int)c->x[3], priority = (int)c->x[4];
-    if ((type != TYPE_VP9 && type != TYPE_VP8) || output != OUTPUT_NV12 || mode != 1)
+    bool texture_output = false;
+#ifdef NSW_VULKAN_VIDEO
+    texture_output = output == OUTPUT_TEXTURE && mode == 2;
+#endif
+    bool audio_output = type==TYPE_VORBIS && output==OUTPUT_PCM16 && mode==1;
+    if (!audio_output && ((type != TYPE_VP9 && type != TYPE_VP8) || (!texture_output && (output != OUTPUT_NV12 || mode != 1))))
         die("movie: unsupported decoder request type=%d output=%d mode=%d", type, output, mode);
     movie_decoder *m = calloc(1, sizeof *m);
     if (!m) die("movie: decoder allocation failed");
     pthread_mutex_init(&m->lock, NULL); pthread_cond_init(&m->wake, NULL); pthread_cond_init(&m->idle, NULL);
-    m->type = type; m->priority = priority;
+    m->type = type; m->priority = priority; m->texture_output = texture_output;
     if (!kernel_access(c->x[0], 16, 3)) die("movie: invalid decoder object");
     dm_guest_write_prepare((void *)(uintptr_t)c->x[0], 16);
     ST64(c->x[0], (uintptr_t)decoder_vtable); ST64(c->x[0] + 8, (uintptr_t)m);

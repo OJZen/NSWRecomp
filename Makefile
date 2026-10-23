@@ -4,7 +4,10 @@ THROUGH ?= nnMain
 export PYTHONDONTWRITEBYTECODE := 1
 export TMPDIR := $(CURDIR)/work/tmp
 
-.PHONY: test inspect generate check-c probe build load-only startup import-tools import-game
+.PHONY: test test-core inspect generate check-c probe build load-only startup import-tools import-game
+test-core:
+	$(PYTHON) tools/test_core.py
+
 test:
 	mkdir -p work/tmp
 	$(PYTHON) tools/bounded.py --log work/logs/tests-upstream.log -- $(PYTHON) -m unittest discover -s third_party/lasrecomp/tools -p 'test_*.py' -v

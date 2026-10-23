@@ -37,12 +37,20 @@ not an iOS deployment model. See [Apple's code-signing documentation](https://su
 | `tools/build.py` | Bounded parallel compilation, object reuse, linking and function-table checks |
 | `tools/load.py` | Input/build receipt checks, symbol resolution and temporary relocation plans |
 | `tools/bounded.py` | Process-group RSS, time and free-space polling guards |
+| `tools/host.py`, `tools/windows_job.py`, `script/windows.ps1` | Windows compiler/lock contracts, Job Object supervision and core entry point |
 | `runtime/probe.c`, `runtime/load.c` | Dispatch, mapped-memory validation, relocations, permissions and cleanup |
 | `tools/startup.py`, `runtime/startup.c` | Bounded guest initialization with stack, TLS and diagnostic checkpoints |
+| `tools/npdm.py` | Fingerprinted, bounded client-service access lists for basic IPC; no signature or full process-policy validation |
 | `tools/import_game.py`, `tools/extract_*.py` | Local container/resource preparation and private temporary-file cleanup |
 | `runtime/graphics/`, `tools/graphics.py` | Cpu-to-NVN bridge, Metal, AppKit, display and input |
+| `runtime/guest_callback.c`, `runtime/graphics_allocator.c` | Portable compiled guest re-entry and graphics/devtools allocator registration |
+| `runtime/time_clock.c`, `runtime/time_clock.h` | Immutable wall/monotonic clock anchor and shared-memory wire layout used by time IPC |
+| `runtime/vulkan_host.*`, `runtime/vulkan_windows.*`, `runtime/vulkan_runtime.*`, `runtime/vulkan_render.*` | Offscreen Windows Vulkan ownership, bounded transfers and color-attachment execution/readback |
+| `runtime/vulkan_*.inc`, `runtime/vulkan_bridge.c`, `runtime/vulkan_display.*` | Checked NVN resources, command snapshots/replay and offscreen VI events |
+| `runtime/audio_headless.c`, `runtime/filesystem_windows.c` | Silent AudioRenderer timing and per-run scratch filesystems for initialization |
 | `tools/*shaders.py` | Local shader extraction, translation and cache identity |
 | `runtime/kernel.c`, `runtime/threads.c` | Memory, handles, threads, events, mutexes and condition waits |
+| `runtime/host.c`, `runtime/host.h` | Windows/Mach reservation, commit, protection, discard, checked copies and entropy |
 | `runtime/services.c`, `runtime/filesystem.c`, `runtime/audio*` | IPC, transactional file access and audio services |
 | `script/build_and_run.sh` | Shared build/launch entry point with process-identity checks |
 | `tests/` | Synthetic checks without game data or keys |
@@ -52,6 +60,19 @@ entries. `--load-only` consumes a temporary plan, maps and relocates module data
 checks entries and releases the mappings. Neither executes guest initialization.
 Original ARM64 `.text` is mapped as non-executable data; host execution uses the
 compiled C functions.
+
+The load-only runtime uses Windows virtual memory APIs on x86-64, with UTF-8 path
+conversion at its native entry point. Module table declarations are generated from
+the selected profile rather than fixed to one adapter. This shared core supports
+up to 13 NSO modules. Kernel-only initialization uses the same module tables,
+guest stack/TLS map and thread algorithms on Windows. Basic-services mode adds
+the existing CMIF/TIPC/session code and portable initialization handlers, with
+optional verified read-only storage and explicit host-font substitution. Windows
+can also opt into temporary scratch filesystems. Offscreen Vulkan adds bounded
+resources, image transfers, compute and shader draws, plus silent audio timing.
+Unsupported operations stop explicitly; desktop presentation, persistent storage
+and audible output require separate work.
+See [Windows contracts](windows.md).
 
 The C output depends on Clang facilities such as `musttail`, 128-bit integers and
 atomic operations. Generating C is not proof of arbitrary compiler or platform

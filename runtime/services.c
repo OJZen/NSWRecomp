@@ -1,9 +1,15 @@
 // Adapted from Zelda-Mobile host/services.c; Apache-2.0, see third_party/zelda-mobile/LICENSE.
 #include "services.h"
 #include "kernel.h"
+#include "host.h"
+#include "time_clock.h"
+#include "romfs.h"
 #include "audio.h"
+#include "audio_out.h"
 #include "filesystem.h"
+#ifndef NSW_BASIC_SERVICES
 #include <opus.h>
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,48 +20,187 @@
 #include <errno.h>
 #include <math.h>
 #include <sys/stat.h>
+#include <wchar.h>
+#ifndef NSW_BASIC_SERVICES
 #include <mach/mach.h>
 #include "mach_memory.h"
+#endif
 
 enum { SM = 1, LM, LOGGER, APM, APM_SESSION, APPLET, APP_PROXY, COMMON_STATE, SELF,
        WINDOW, AUDIO, DISPLAY, LIBRARY, APPLICATION, DEBUG, AOC, ECTX, FS, PCTL, PCTL_SESSION,
        TIME, USER_CLOCK, NETWORK_CLOCK, STEADY_CLOCK, TIMEZONE, LOCAL_CLOCK, ROM_STORAGE, ACCOUNT, FONTS, AUD_MANAGER, AUD_RENDERER, AUD_DEVICE, OPUS_MANAGER,
-       LAUNCH_STORAGE, LAUNCH_ACCESSOR, CACHE_READER, ACCOUNT_MANAGER, ACCOUNT_PROFILE, SAVE_FS, TEMP_FS, LOCAL_FILE, CACHE_FS, PREPO, NFP, NFP_USER,
+       LAUNCH_STORAGE, LAUNCH_ACCESSOR, CACHE_READER, ACCOUNT_MANAGER, ACCOUNT_PROFILE, SAVE_FS, TEMP_FS, LOCAL_FILE, CACHE_FS, PREPO, NFP, NFP_USER, SETTINGS, HID, AUD_OUT_MANAGER, AUD_OUT,
        INVALID_HANDLE = 0xe401, INVALID_MESSAGE = 0x1c01 };
 static const char *kind_names[] = {"none", "sm", "lm", "logger", "apm", "apm-session",
     "appletOE", "application-proxy", "common-state", "self-controller", "window-controller",
     "audio-controller", "display-controller", "library-applet-creator", "application-functions", "debug-functions",
-    "aoc:u", "ectx:aw", "fsp-srv", "pctl", "parental-control", "time:u", "user-clock", "network-clock", "steady-clock", "timezone", "local-clock", "rom-storage", "acc:u0", "pl:u", "audren:u", "audio-renderer", "audio-device", "hwopus", "launch-storage", "launch-accessor", "cache-reader", "account-manager", "account-profile", "save-filesystem", "temporary-filesystem", "local-file", "cache-filesystem", "prepo:u", "nfp:user", "nfp-user"};
+    "aoc:u", "ectx:aw", "fsp-srv", "pctl", "parental-control", "time:u", "user-clock", "network-clock", "steady-clock", "timezone", "local-clock", "rom-storage", "acc:u0", "pl:u", "audren:u", "audio-renderer", "audio-device", "hwopus", "launch-storage", "launch-accessor", "cache-reader", "account-manager", "account-profile", "save-filesystem", "temporary-filesystem", "local-file", "cache-filesystem", "prepo:u", "nfp:user", "nfp-user", "set", "hid", "audout:u", "audio-out"};
 // Current main.npdm service-access list; optional privileged services must get SM NotAllowed.
+#ifndef NSW_BASIC_SERVICES
 static const char *allowed_services[] = {"acc:u0", "aoc:u", "apm", "appletOE", "audin:u", "audout:u", "audren:u",
     "banana", "bcat:u", "bsd:u", "bsdcfg", "caps:su", "caps:u", "csrng", "ectx:aw", "friend:u", "fsp-srv", "hid",
     "htc", "htc:tenv", "htcs", "hwopus", "irs", "ldn:u", "ldr:ro", "lm", "mii:u", "mm:u", "mnpp:app", "nfc:mf:u",
     "nfc:user", "nfp:user", "ngc:u", "ngct:u", "nifm:u", "nim:eca", "notif:a", "nsd:u", "ntc", "nvdrv", "pcm",
     "pctl", "pl:u", "prepo:u", "set", "sfdnsres", "ssl", "time:u", "vi:u"};
+#endif
 static pthread_mutex_t services_lock = PTHREAD_MUTEX_INITIALIZER;
 struct service_context { uint32_t kind, objects[16], value, values[16]; local_file *file, *files[16]; unsigned refs; bool registered, domain; };
 static struct session { uint32_t handle; bool closed; struct service_context *context; } sessions[64];
 static uint32_t next_handle = 0x10000;
+static char access_names[128][9];
+static size_t access_count;
+static bool access_configured;
+static uint64_t program_id = UINT64_C(0x0100f2c0115b6000);
 static _Thread_local char blocker[80] = "unsupported IPC";
+const char *service_blocker(void) { return blocker; }
+static bool blocked(const char *name) { snprintf(blocker, sizeof blocker, "%s", name); return false; }
+
+bool service_set_program(uint64_t program) {
+    pthread_mutex_lock(&services_lock);
+    bool idle = true;
+    for (size_t i = 0; i < sizeof sessions / sizeof *sessions; i++) idle &= !sessions[i].context;
+    if (idle && program_id != program) program_id = program;
+    pthread_mutex_unlock(&services_lock);
+    return idle;
+}
+
+bool service_set_access(const char *names) {
+    if (!names) return false;
+    char candidate[128][9] = {{0}};
+    size_t count = 0;
+    while (*names) {
+        size_t length = strcspn(names, ",");
+        if (!length || length > 8 || count == 128) return false;
+        for (size_t i = 0; i < length; i++)
+            if ((unsigned char)names[i] < 33 || (unsigned char)names[i] > 126 ||
+                    (names[i] == '*' && i + 1 != length)) return false;
+        memcpy(candidate[count++], names, length);
+        names += length;
+        if (*names && !*++names) return false;
+    }
+    pthread_mutex_lock(&services_lock);
+    bool idle = true;
+    for (size_t i = 0; i < sizeof sessions / sizeof *sessions; i++) idle &= !sessions[i].context;
+    if (idle) {
+        memcpy(access_names, candidate, sizeof candidate);
+        access_count = count; access_configured = true;
+    }
+    pthread_mutex_unlock(&services_lock);
+    return idle;
+}
+
+static bool allowed_service(const char name[9]) {
+    if (access_configured) {
+        for (size_t i = 0; i < access_count; i++) {
+            size_t length = strlen(access_names[i]);
+            if (access_names[i][length - 1] == '*') {
+                if (!strncmp(name, access_names[i], length - 1)) return true;
+            } else if (!strcmp(name, access_names[i])) return true;
+        }
+        return false;
+    }
+#ifndef NSW_BASIC_SERVICES
+    for (size_t i = 0; i < sizeof allowed_services / sizeof *allowed_services; i++)
+        if (!strcmp(name, allowed_services[i])) return true;
+#endif
+    return false;
+}
 static uint32_t performance_config[2];
 static bool performance_config_set[2];
-static bool request_exit_on_execute;
+static uint32_t cpu_boost_mode;
+static TimeClock clock_state;
 static struct { uint32_t write, read; } notifications[8]; // Applet, audio routing and NFC availability changes.
+static struct { uint32_t write, read; } hid_notifications[10];
+static uint64_t hid_hold;
+static uint8_t hid_assignment[10];
+void service_hid_hold_changed(unsigned value) {
+    pthread_mutex_lock(&services_lock); if (value <= 1) hid_hold = value; pthread_mutex_unlock(&services_lock);
+}
+static unsigned hid_index(unsigned id) { return id < 8 ? id : id == 0x20 ? 8 : id == 0x10 ? 9 : 10; }
+void service_hid_style_changed(unsigned id) {
+    unsigned index = hid_index(id);
+    pthread_mutex_lock(&services_lock);
+    if (index < 10 && hid_notifications[index].write) {
+        uint64_t regs[31] = {hid_notifications[index].write}; kernel_svc(0x11, regs);
+    }
+    pthread_mutex_unlock(&services_lock);
+}
 static bool initial_focus_pending = true;
 static struct { bool foreground, operation_notification, performance_notification, restart_notification, suspend_out_of_focus; uint8_t focus_handling[3]; uint32_t idle_extension; } applet_state;
-static uint8_t clock_page[0x1000];
-static bool clock_initialized;
-static uint32_t cpu_boost_mode;
-static int romfs_fd = -1;
-static uint64_t romfs_size;
+
+static bool clock_monotonic(int64_t *nanoseconds) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) || now.tv_sec < 0 || now.tv_nsec < 0 || now.tv_nsec >= 1000000000) return false;
+    __int128 value = (__int128)now.tv_sec * 1000000000 + now.tv_nsec;
+    if (value > INT64_MAX) return false;
+    *nanoseconds = (int64_t)value;
+    return true;
+}
+
+static bool initialize_clock(void) {
+    if (clock_state.initialized) return true;
+    int64_t steady; struct timespec wall; uint8_t source[16];
+    if (clock_gettime(CLOCK_REALTIME, &wall) || !clock_monotonic(&steady) || !host_random(source, sizeof source)) return false;
+    return time_clock_initialize(&clock_state, steady, (int64_t)wall.tv_sec, source);
+}
+
+static Romfs *romfs;
 static uint64_t romfs_reads, romfs_bytes;
-static uint8_t *font_memory;
-static uint32_t font_size;
-static const char *audio_devices[] = {"AudioTvOutput", "AudioBuiltInSpeakerOutput", "AudioStereoJackOutput", "MainAudioOut", "AudioExternalOutput", "AudioUsbDeviceOutput"};
-static float device_volume[6] = {1, 1, 1, 1, 1, 1};
-static float expected_volume[2] = {1, 1};
+static bool romfs_cleanup_registered;
+static void close_romfs(void) {
+    if (romfs) fprintf(stderr, "ROMFS reads=%llu bytes=%llu\n", romfs_reads, romfs_bytes);
+    romfs_close(romfs); romfs = NULL;
+    romfs_reads = romfs_bytes = 0;
+}
+static void close_romfs_on_exit(void) {
+    pthread_mutex_lock(&services_lock);
+    close_romfs();
+#ifdef NSW_SCRATCH_FS
+    filesystem_shutdown();
+#endif
+    pthread_mutex_unlock(&services_lock);
+}
+static bool open_romfs(void) {
+    if (romfs) return true;
+    const char *path = getenv("ZELDA_ROMFS");
+    if (!path || !*path) return blocked("merged RomFS unavailable (ZELDA_ROMFS)");
+    uintptr_t inherited = 0;
+#ifdef _WIN32
+    const char *text = getenv("NSW_ROMFS_HANDLE");
+    if (text) {
+        char *end; errno = 0;
+        unsigned long long value = strtoull(text, &end, 10);
+        if (!*text || strspn(text, "0123456789") != strlen(text) || *end || errno || !value || value > UINTPTR_MAX)
+            return blocked("invalid inherited RomFS handle");
+        inherited = (uintptr_t)value;
+    }
+#endif
+    romfs = romfs_open(path, inherited);
+    if (!romfs) return blocked("invalid merged RomFS header or table bounds");
+    if (!romfs_cleanup_registered) {
+        if (atexit(close_romfs_on_exit)) { close_romfs(); return blocked("RomFS cleanup registration failed"); }
+        romfs_cleanup_registered = true;
+    }
+    fprintf(stderr, "ROMFS opened bytes=%llu\n", (unsigned long long)romfs_size(romfs));
+    return true;
+}
+
+static const char languages[][8] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
 static bool preselected_user_pending = true;
 static const uint32_t preselected_user[0x88 / 4] = {0xc79497ca, 1, 1}; // One local offline profile, UID 1.
+
+#ifndef NSW_BASIC_SERVICES
+static bool request_exit_on_execute;
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_HEADLESS_AUDIO)
+static const char *audio_devices[] = {"AudioTvOutput", "AudioBuiltInSpeakerOutput", "AudioStereoJackOutput", "MainAudioOut", "AudioExternalOutput", "AudioUsbDeviceOutput"};
+static float device_volume[6] = {1, 1, 1, 1, 1, 1};
+#ifndef NSW_BASIC_SERVICES
+static float expected_volume[2] = {1, 1};
+#endif
+#endif
+static uint8_t *font_memory;
+static uint32_t font_size;
 #define FONT_MEMORY_SIZE 0x1100000
 
 static void close_fonts(void) { free(font_memory); font_memory = NULL; }
@@ -86,9 +231,15 @@ static bool has_truetype_outlines(const uint8_t *data, size_t size) {
 }
 static bool initialize_fonts(void) {
     if (font_memory) return true;
+    // One explicitly selected host font substitutes six faces. Missing platform
+    // symbols and metric differences remain outside this initialization proof.
+#ifdef _WIN32
+    const wchar_t *path = _wgetenv(L"ZELDA_SHARED_FONT");
+    FILE *file = path && *path ? _wfopen(path, L"rb") : NULL;
+#else
     const char *path = getenv("ZELDA_SHARED_FONT");
-    // shortcut: one installed CJK font substitutes all six faces; platform-specific symbols may be absent.
     FILE *file = fopen(path && *path ? path : "/System/Library/Fonts/Supplemental/AppleGothic.ttf", "rb");
+#endif
     if (!file) return false;
     struct stat st;
     if (fstat(fileno(file), &st) || st.st_size < 12 || st.st_size > FONT_MEMORY_SIZE - 8) { fclose(file); return false; }
@@ -104,27 +255,7 @@ static bool initialize_fonts(void) {
     return true;
 }
 
-static void initialize_clock(void) {
-    if (clock_initialized) return;
-    struct { int64_t base; uint8_t source[16]; } steady = {0};
-    arc4random_buf(steady.source, sizeof steady.source);
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    struct { int64_t offset, timestamp; uint8_t source[16]; } system = {.offset = time(NULL) - ts.tv_sec, .timestamp = ts.tv_sec};
-    memcpy(system.source, steady.source, 16);
-    // libnx/SDK double-buffered clock contexts; both snapshots are initially identical.
-    memcpy(clock_page + 8, &steady, sizeof steady); memcpy(clock_page + 8 + sizeof steady, &steady, sizeof steady);
-    for (unsigned offset = 0x38; offset <= 0x80; offset += 0x48) {
-        memcpy(clock_page + offset + 8, &system, sizeof system);
-        memcpy(clock_page + offset + 8 + sizeof system, &system, sizeof system);
-    }
-    // The v1.4.3 SDK reads the continuous-adjustment context at 0xd0, not just the legacy steady context.
-    struct { int64_t point, rate, shift, lower, upper; uint8_t source[16]; } adjustment = {0};
-    memcpy(adjustment.source, steady.source, 16);
-    memcpy(clock_page + 0xd8, &adjustment, sizeof adjustment);
-    memcpy(clock_page + 0xd8 + sizeof adjustment, &adjustment, sizeof adjustment);
-    clock_initialized = true;
-}
-
+#ifndef NSW_BASIC_SERVICES
 static bool calendar_time(int64_t timestamp, uint8_t out[32]) {
     time_t seconds = timestamp; struct tm calendar;
     if (!localtime_r(&seconds, &calendar) || calendar.tm_year < -1900 || calendar.tm_year > INT16_MAX - 1900) return false;
@@ -138,47 +269,9 @@ static bool calendar_time(int64_t timestamp, uint8_t out[32]) {
     return true;
 }
 
-const char *service_blocker(void) { return blocker; }
-static bool blocked(const char *name) { snprintf(blocker, sizeof blocker, "%s", name); return false; }
 
-static void close_romfs(void) {
-    if (romfs_fd >= 0) {
-        fprintf(stderr, "ROMFS reads=%llu bytes=%llu\n", romfs_reads, romfs_bytes);
-        close(romfs_fd);
-    }
-    romfs_fd = -1;
-}
-static void close_romfs_on_exit(void) {
-    // Fatal exits can originate on another guest thread while a storage read is in progress.
-    pthread_mutex_lock(&services_lock);
-    close_romfs();
-}
-static bool open_romfs(void) {
-    if (romfs_fd >= 0) return true;
-    const char *path = getenv("ZELDA_ROMFS");
-    if (!path || !*path) return blocked("merged RomFS unavailable (ZELDA_ROMFS)");
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
-    if (fd < 0) return blocked("merged RomFS unavailable (ZELDA_ROMFS)");
-    struct stat stat; uint64_t header[10];
-    bool valid = !fstat(fd, &stat) && S_ISREG(stat.st_mode) && stat.st_size >= 0x50 &&
-        pread(fd, header, sizeof header, 0) == sizeof header && header[0] == 0x50;
-    if (valid) {
-        for (unsigned i = 1; i < 9; i += 2) {
-            valid &= header[i] >= 0x50 && header[i] <= (uint64_t)stat.st_size &&
-                header[i + 1] <= (uint64_t)stat.st_size - header[i];
-            for (unsigned j = 1; j < i; j += 2)
-                if (header[i] < header[j] + header[j + 1] && header[j] < header[i] + header[i + 1]) valid = false;
-        }
-        valid &= header[4] >= 24 && header[9] >= 0x50 && header[9] <= (uint64_t)stat.st_size;
-    }
-    if (!valid) { close(fd); return blocked("invalid merged RomFS header or table bounds"); }
-    // Structural checks cannot establish the game version; supply the merged v1.4.3 image.
-    romfs_fd = fd; romfs_size = (uint64_t)stat.st_size;
-    if (atexit(close_romfs_on_exit)) { close_romfs(); return blocked("RomFS cleanup registration failed"); }
-    fprintf(stderr, "ROMFS opened bytes=%llu\n", romfs_size);
-    return true;
-}
 
+#endif
 static struct session *session(uint32_t handle) {
     for (size_t i = 0; i < sizeof sessions / sizeof *sessions; i++)
         if (sessions[i].handle == handle && sessions[i].context) return &sessions[i];
@@ -199,9 +292,18 @@ static uint32_t open_session(unsigned kind, struct service_context *shared) {
 }
 
 static void close_object(unsigned kind, unsigned value, local_file *file) {
+#ifdef NSW_HEADLESS_AUDIO
+    if (kind == AUD_OUT) audio_out_close();
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_HEADLESS_AUDIO)
     if (kind == AUD_RENDERER) audio_close();
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_SCRATCH_FS)
     filesystem_close(file);
     if (kind == SAVE_FS || kind == TEMP_FS || kind == CACHE_FS) filesystem_unmount(value);
+#else
+    (void)kind; (void)value; if (file) abort();
+#endif
 }
 static bool close_session(uint32_t handle) {
     struct session *s = session(handle);
@@ -216,6 +318,9 @@ static bool close_session(uint32_t handle) {
 }
 
 static bool connect_port(const char *name, uint32_t *handle) {
+#ifdef NSW_BASIC_SERVICES
+    if (!access_configured) return blocked("service access policy unavailable");
+#endif
     if (strcmp(name, "sm:")) return blocked("unknown named port");
     *handle = open_session(SM, NULL);
     return *handle ? true : blocked("service session table full");
@@ -339,13 +444,20 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         payload = aligned + 16;
         data_size -= payload - start;
     }
-    if ((copied || transfer) && (control || command != 0 ||
-        !((kind == APPLET && copied && !transfer) || (kind == AUD_MANAGER && copied && transfer)))) {
+#ifdef NSW_BASIC_SERVICES
+    (void)receive_address; (void)object_value; (void)file;
+#endif
+    if ((copied || transfer) && (control ||
+        !((command == 0 && ((kind == APPLET && copied && !transfer) || (kind == AUD_MANAGER && copied && transfer))) ||
+          (kind == AUD_OUT_MANAGER && (command == 1 || command == 3) && copied && !transfer)))) {
         fprintf(stderr, "IPC handle request service=%s command=%u pid=%u process=%u transfer=%u bytes=%zu\n",
                 kind_names[kind], command, pid, !!copied, !!transfer, data_size);
         return blocked("IPC unexpected copied handles");
     }
-    if (receive_length && (control || !((kind == LAUNCH_ACCESSOR && command == 11) || (kind == NFP_USER && command == 2) || (kind == TIME && command == 400)))) return blocked("IPC receive-static buffer for unsupported command");
+    if (receive_length && (control || !((kind == LAUNCH_ACCESSOR && command == 11) || (kind == NFP_USER && command == 2) || (kind == TIME && command == 400) || (kind == SETTINGS && command == 1) || kind == AUD_OUT_MANAGER || kind == AUD_OUT))) return blocked("IPC receive-static buffer for unsupported command");
+#ifdef NSW_HEADLESS_AUDIO
+#include "audio_out_ipc.inc"
+#endif
     if (!control && kind == AUD_DEVICE && getenv("ZELDA_IPC_LOG")) fprintf(stderr, "AUDIO device command=%u X=%u A=%u B=%u W=%u\n", command, statics, sends, receives, exchanges);
     if (!control && kind == LOGGER && command == 0 && statics <= 1 && sends <= 1 && !receives && !exchanges) {
         uint64_t address = 0, length = 0;
@@ -366,8 +478,7 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (length < 24 || length > 65536 || address > UINT64_MAX - length) return true;
         uint8_t *packet = malloc((size_t)length);
         if (!packet) { *result = 0xce01; return true; }
-        mach_vm_size_t got = 0;
-        if (mach_vm_read_overwrite(mach_task_self(), address, length, (mach_vm_address_t)packet, &got) || got != length) {
+        if (!host_read(packet, address, (size_t)length)) {
             free(packet); *result = 0xe601; return true;
         }
         bool valid = word(packet, 20) == length - 24;
@@ -380,11 +491,47 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         free(packet);
         return true;
     }
-    if (!control && kind == AOC && command == 3 && !statics && !sends && receives == 1 && !exchanges) {
-        if (!pid || data_size < 16) return true;
-        uint64_t address, capacity; mapped_buffer(bytes, descriptors, &address, &capacity);
-        if (capacity % 4 || word(bytes, payload + 4) > capacity / 4 || address > UINT64_MAX - capacity) return true;
-        const uint32_t count = 0; // This title's local resources contain no installed add-on content.
+    if (!control && kind == LAUNCH_ACCESSOR && command == 11 && !statics && !sends && receives <= 1 && !exchanges) {
+        if (data_size < 8) return true;
+        uint64_t address = receive_address, length = receive_length;
+        if (receives) {
+            uint64_t mapped, mapped_length; mapped_buffer(bytes, descriptors, &mapped, &mapped_length);
+            if (mapped_length) {
+                if (length) return true;
+                address = mapped; length = mapped_length;
+            }
+        }
+        uint64_t offset = wide(bytes, payload);
+        if (offset > sizeof preselected_user || length > sizeof preselected_user - offset) return true;
+        if (length && !host_write(address, (const uint8_t *)preselected_user + offset, (size_t)length)) { *result = 0xe601; return true; }
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
+        return true;
+    }
+    if (!control && kind == FONTS && command <= 4) {
+        if (!initialize_fonts()) return blocked("shared font needs TrueType glyf/loca within 17 MiB (ZELDA_SHARED_FONT)");
+        if (command < 4) {
+            if (data_size < 4 || word(bytes, payload) >= 6) return true;
+            uint32_t value = command == 1 ? 1 : command == 2 ? font_size : 8;
+            if (reply(bytes, size, tipc, token, 0, domain, 0, &value, command ? 4 : 0)) *result = 0;
+        } else {
+            uint32_t handle = kernel_readonly_memory(font_memory, FONT_MEMORY_SIZE);
+            if (!handle) { *result = 0xce01; return true; }
+            if (reply(bytes, size, tipc, token, handle, domain, 0, NULL, 0)) {
+                uint32_t descriptor = 2; memcpy(bytes + 8, &descriptor, 4); *result = 0;
+            } else { uint64_t regs[31] = {handle}; kernel_svc(0x16, regs); }
+        }
+        return true;
+    }
+    if (!control && kind == SETTINGS && (command == 1 || command == 5) && !statics && !sends && !exchanges && receives <= 1) {
+        uint64_t address = receive_address, length = receive_length;
+        if (command == 5) {
+            if (receives != 1 || receive_length) return true;
+            mapped_buffer(bytes, descriptors, &address, &length);
+        } else if (receives) return true;
+        if (length % 8) return true;
+        uint32_t available = command == 1 ? 15 : (uint32_t)(sizeof languages / sizeof *languages);
+        uint32_t count = length / 8 < available ? (uint32_t)(length / 8) : available;
+        if (count && !host_write(address, languages, (size_t)count * 8)) { *result = 0xe601; return true; }
         if (reply(bytes, size, tipc, token, 0, domain, 0, &count, sizeof count)) *result = 0;
         return true;
     }
@@ -392,24 +539,24 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (data_size < 16) return true;
         uint64_t address, capacity; mapped_buffer(bytes, descriptors, &address, &capacity);
         uint64_t offset = wide(bytes, payload), length = wide(bytes, payload + 8);
-        if (offset > romfs_size || length > romfs_size - offset || length > capacity || length > UINT64_MAX - address) return true;
+        uint64_t total = romfs_size(romfs);
+        if (offset > total || length > total - offset || length > capacity || length > UINT64_MAX - address) return true;
         // IPC also runs on small guest audio stacks; the services mutex serializes this scratch buffer.
         static uint8_t chunk[65536];
         for (uint64_t done = 0; done < length;) {
             size_t count = length - done < sizeof chunk ? (size_t)(length - done) : sizeof chunk;
-            ssize_t got = pread(romfs_fd, chunk, count, (off_t)(offset + done));
-            if (got < 0 && errno == EINTR) continue;
-            if (got <= 0) return blocked("RomFS read failed or image changed");
-            dm_guest_write_prepare((void *)(address + done), (size_t)got);
-            if (mach_vm_write(mach_task_self(), address + done, (vm_offset_t)chunk, (mach_msg_type_number_t)got)) {
-                *result = 0xe601; return true;
-            }
-            done += (uint64_t)got;
+            if (!romfs_read(romfs, offset + done, chunk, count)) return blocked("RomFS read failed or image changed");
+#ifndef NSW_BASIC_SERVICES
+            dm_guest_write_prepare((void *)(address + done), count);
+#endif
+            if (!host_write(address + done, chunk, count)) { *result = 0xe601; return true; }
+            done += count;
         }
         romfs_reads++; romfs_bytes += length;
         if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
         return true;
     }
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_HEADLESS_AUDIO)
     if (!control && kind == AUD_DEVICE && (command == 7 || command == 8) && statics <= 1 && sends <= 1 &&
         (statics || sends) && !receives && !exchanges) {
         uint64_t address = 0, length = 0;
@@ -424,8 +571,8 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
                 address = mapped; length = mapped_length;
             }
         }
-        char name[256]; mach_vm_size_t got;
-        if (length < sizeof name || mach_vm_read_overwrite(mach_task_self(), address, sizeof name, (mach_vm_address_t)name, &got) || got != sizeof name || !memchr(name, 0, sizeof name)) return true;
+        char name[256];
+        if (length < sizeof name || !host_read(name, address, sizeof name) || !memchr(name, 0, sizeof name)) return true;
         unsigned device = 0; while (device < 6 && strcmp(name, audio_devices[device])) device++;
         if (device == 6) return blocked("unknown audio output device");
         if (command == 7) {
@@ -451,7 +598,7 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         } else strcpy(names[0], "AudioTvOutput");
         if (capacity < sizeof names[0]) return true;
         if (count > capacity / sizeof names[0]) count = (uint32_t)(capacity / sizeof names[0]);
-        if (mach_vm_write(mach_task_self(), address, (vm_offset_t)names, count * sizeof names[0])) { *result = 0xe601; return true; }
+        if (!host_write(address, names, count * sizeof names[0])) { *result = 0xe601; return true; }
         bool list = command == 0 || command == 6 || command == 14;
         if (reply(bytes, size, tipc, token, 0, domain, 0, &count, list ? 4 : 0)) *result = 0;
         return true;
@@ -461,35 +608,21 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         mapped_buffer(bytes, descriptors, &address, &length);
         mapped_buffer(bytes, descriptors + 12, &destination, &capacity);
         if (length < 64 || length > (4 << 20) || capacity < 64 || capacity > (4 << 20)) return true;
-        uint8_t *input = malloc(length), *output = malloc(capacity); mach_vm_size_t got;
+        uint8_t *input = malloc(length), *output = malloc(capacity);
         if (!input || !output) { free(input); free(output); *result = 0xce01; return true; }
-        if (mach_vm_read_overwrite(mach_task_self(), address, length, (mach_vm_address_t)input, &got) || got != length) {
+        if (!host_read(input, address, length)) {
             free(input); free(output); *result = 0xe601; return true;
         }
         size_t written = audio_update(input, length, output, capacity); free(input);
         if (!written) { free(output); return blocked("unsupported audio update layout or voice parameters"); }
-        kern_return_t status = mach_vm_write(mach_task_self(), destination, (vm_offset_t)output, (mach_msg_type_number_t)written);
+        bool status = !host_write(destination, output, written);
         free(output);
         if (status) { *result = 0xe601; return true; }
         if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
         return true;
     }
-    if (!control && kind == LAUNCH_ACCESSOR && command == 11 && !statics && !sends && receives <= 1 && !exchanges) {
-        if (data_size < 8) return true;
-        uint64_t address = receive_address, length = receive_length;
-        if (receives) {
-            uint64_t mapped, mapped_length; mapped_buffer(bytes, descriptors, &mapped, &mapped_length);
-            if (mapped_length) {
-                if (length) return true;
-                address = mapped; length = mapped_length;
-            }
-        }
-        uint64_t offset = wide(bytes, payload);
-        if (offset > sizeof preselected_user || length > sizeof preselected_user - offset) return true;
-        if (length && mach_vm_write(mach_task_self(), address, (vm_offset_t)((const uint8_t *)preselected_user + offset), (mach_msg_type_number_t)length)) { *result = 0xe601; return true; }
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
-        return true;
-    }
+#endif
+#ifndef NSW_BASIC_SERVICES
     if (!control && kind == CACHE_READER && command == 0 && !statics && !sends && receives == 1 && !exchanges) {
         uint64_t address, capacity; mapped_buffer(bytes, descriptors, &address, &capacity);
         uint8_t infos[FILESYSTEM_CACHE_COUNT][0x60] = {{0}};
@@ -511,14 +644,15 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, &count, sizeof count)) { *object_value = next; *result = 0; }
         return true;
     }
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_SCRATCH_FS)
     if (!control && (kind == SAVE_FS || kind == TEMP_FS || kind == CACHE_FS) && command <= 8 && statics == (command == 5 || command == 6 ? 2u : 1u) && !sends && !receives && !exchanges) {
         char paths[2][0x301] = {{0}};
         for (unsigned i = 0; i < statics; i++) {
             uint32_t d = word(bytes, descriptors + i * 8); size_t length = d >> 16;
             uint64_t address = word(bytes, descriptors + i * 8 + 4) | ((uint64_t)((d >> 12) & 15) << 32) | ((uint64_t)((d >> 6) & 63) << 36);
-            mach_vm_size_t got;
             if (!length || length > sizeof paths[0]) return true;
-            if (mach_vm_read_overwrite(mach_task_self(), address, length, (mach_vm_address_t)paths[i], &got) || got != length) { *result = 0xe601; return true; }
+            if (!host_read(paths[i], address, length)) { *result = 0xe601; return true; }
             if (!memchr(paths[i], 0, length)) return true;
         }
         if ((command == 0 && (data_size < 16 || word(bytes, payload))) || (command == 8 && data_size < 4)) return true;
@@ -534,19 +668,30 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         uint64_t address, capacity; mapped_buffer(bytes, descriptors, &address, &capacity);
         uint64_t length = wide(bytes, payload + 16), offset = wide(bytes, payload + 8);
         if (length > capacity || length > (4 << 20)) return true;
-        uint8_t *data = malloc(length ? length : 1); mach_vm_size_t got;
+        uint8_t *data = malloc(length ? length : 1);
         if (!data) { *result = 0xce01; return true; }
-        if (command && length && (mach_vm_read_overwrite(mach_task_self(), address, length, (mach_vm_address_t)data, &got) || got != length)) { free(data); *result = 0xe601; return true; }
+        if (command && length && !host_read(data, address, (size_t)length)) { free(data); *result = 0xe601; return true; }
         uint64_t count = 0;
         uint32_t status = filesystem_file(file, command, offset, data, (size_t)length, &count);
         if (!status && !command && count) {
+#ifndef NSW_BASIC_SERVICES
             dm_guest_write_prepare((void *)address, (size_t)count);
-            if (mach_vm_write(mach_task_self(), address, (vm_offset_t)data, (mach_msg_type_number_t)count)) { free(data); *result = 0xe601; return true; }
+#endif
+            if (!host_write(address, data, (size_t)count)) { free(data); *result = 0xe601; return true; }
         }
         free(data);
         if (!status && command && word(bytes, payload)) status = filesystem_file(file, 2, 0, NULL, 0, NULL);
         if (status) { if (reply_status(bytes, size, tipc, token, domain, status)) *result = 0; }
         else if (reply(bytes, size, tipc, token, 0, domain, 0, &count, command ? 0 : 8)) *result = 0;
+        return true;
+    }
+#endif
+    if (!control && kind == AOC && command == 3 && !statics && !sends && receives == 1 && !exchanges) {
+        if (!pid || data_size < 16) return true;
+        uint64_t address, capacity; mapped_buffer(bytes, descriptors, &address, &capacity);
+        if (capacity % 4 || word(bytes, payload + 4) > capacity / 4 || address > UINT64_MAX - capacity) return true;
+        const uint32_t count = 0; // This title's local resources contain no installed add-on content.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &count, sizeof count)) *result = 0;
         return true;
     }
     if ((h0 >> 16) && !(kind == NFP_USER && !control && command == 0 && sends == 1 && !statics && !receives && !exchanges)) {
@@ -585,6 +730,7 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         }
         return true;
     }
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_SCRATCH_FS)
     if (!control && (kind == SAVE_FS || kind == TEMP_FS || kind == CACHE_FS) && command == 10) {
         if (reply_status(bytes, size, tipc, token, domain, filesystem_commit(*object_value))) *result = 0;
         return true;
@@ -597,6 +743,8 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         else if (reply(bytes, size, tipc, token, 0, domain, 0, &value, command == 4 ? 8 : 0)) *result = 0;
         return true;
     }
+#endif
+#ifndef NSW_BASIC_SERVICES
     if (!control && kind == AUDIO && command <= 2) {
         if (!command) {
             float levels[2];
@@ -608,28 +756,95 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, expected_volume + (command == 2), command ? 4 : 0)) *result = 0;
         return true;
     }
+#endif
     if (!control && kind == LAUNCH_STORAGE && command == 0) open_kind = LAUNCH_ACCESSOR;
     if (!control && kind == LAUNCH_ACCESSOR && command == 0) {
         const uint64_t length = sizeof preselected_user;
         if (reply(bytes, size, tipc, token, 0, domain, 0, &length, sizeof length)) *result = 0;
         return true;
     }
-    if (!control && kind == SM && command == 1 && s->registered && data_size >= 8) {
-        const char *allowed = NULL;
-        for (size_t i = 0; i < sizeof allowed_services / sizeof *allowed_services; i++) {
-            char name[8] = {0}; memcpy(name, allowed_services[i], strlen(allowed_services[i]));
-            if (!memcmp(bytes + payload, name, 8)) { allowed = allowed_services[i]; break; }
+    if (!control && kind == ACCOUNT && (command == 100 || command == 140 || command == 160)) {
+        if (!pid || data_size < 8) return true;
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
+        return true;
+    }
+    if (!control && kind == ACCOUNT && command == 150 && s->registered) {
+        const uint8_t switch_locked = 0;
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &switch_locked, sizeof switch_locked)) *result = 0;
+        return true;
+    }
+    if (!control && kind == ACCOUNT && (command == 5 || command == 101) && s->registered) {
+        if (data_size < 16 || memcmp(bytes + payload, preselected_user + 2, 16)) return true;
+        open_kind = command == 5 ? ACCOUNT_PROFILE : ACCOUNT_MANAGER;
+    }
+    if (!control && kind == ACCOUNT_PROFILE && command == 1) {
+        uint8_t profile[0x38] = {0}; memcpy(profile, preselected_user + 2, 16); memcpy(profile + 24, "Local Player", 13);
+        if (reply(bytes, size, tipc, token, 0, domain, 0, profile, sizeof profile)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 21) {
+        // Stable headless language policy; the full adapter retains its default.
+#ifdef NSW_BASIC_SERVICES
+        const char language[8] = "en-US";
+#else
+        const char language[8] = "zh-Hans";
+#endif
+        if (reply(bytes, size, tipc, token, 0, domain, 0, language, sizeof language)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 40) {
+        const uint8_t ready = 1; // NotifyRunning: this local host has no HOME-menu transition to wait for.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &ready, sizeof ready)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 1 && data_size >= 4) {
+        if (word(bytes, payload) == 2 && preselected_user_pending) open_kind = LAUNCH_STORAGE;
+        else {
+            if (reply_status(bytes, size, tipc, token, domain, 0x480)) *result = 0;
+            return true;
         }
-        if (!allowed) {
+    }
+    if (!control && kind == SETTINGS && (command == 0 || command == 2)) {
+        unsigned language = 1; // Headless en-US policy, consistent with the applet.
+#ifndef NSW_BASIC_SERVICES
+        language = 15;
+#endif
+        if (command == 2) {
+            if (data_size < 4 || word(bytes, payload) >= sizeof languages / sizeof *languages) return true;
+            language = word(bytes, payload);
+        }
+        if (reply(bytes, size, tipc, token, 0, domain, 0, languages[language], 8)) *result = 0;
+        return true;
+    }
+    if (!control && kind == SETTINGS && (command == 3 || command == 4 || command == 6 || command == 8)) {
+        uint32_t value = command == 3 ? 15 : command == 6 ? sizeof languages / sizeof *languages : command == 4 ? 1 : 0;
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &value, command == 8 ? 1 : 4)) *result = 0;
+        return true;
+    }
+    if (!control && kind == SM && command == 1 && s->registered && data_size >= 8) {
+        char allowed[9] = {0}; memcpy(allowed, bytes + payload, 8);
+        size_t length = strlen(allowed);
+        bool valid_name = length != 0;
+        for (size_t i = length; i < 8; i++) valid_name &= allowed[i] == 0;
+        if (!valid_name || !allowed_service(allowed)) {
             if (reply_status(bytes, size, tipc, token, domain, 0x1015)) *result = 0;
             return true;
         }
-        const unsigned services[] = {LM, APM, APPLET, AOC, ECTX, FS, PCTL, TIME, ACCOUNT, FONTS, AUD_MANAGER, OPUS_MANAGER, PREPO, NFP};
+#ifdef NSW_BASIC_SERVICES
+        const unsigned services[] = {LM, FS, APM, APPLET, AOC, PCTL, TIME, ACCOUNT, SETTINGS, HID, FONTS
+#ifdef NSW_HEADLESS_AUDIO
+            , AUD_MANAGER, AUD_OUT_MANAGER
+#endif
+        };
+#else
+        const unsigned services[] = {LM, APM, APPLET, AOC, ECTX, FS, PCTL, TIME, ACCOUNT, FONTS, AUD_MANAGER, OPUS_MANAGER, PREPO, NFP, SETTINGS, HID};
+#endif
         for (size_t i = 0; i < sizeof services / sizeof *services; i++)
             if (!strcmp(allowed, kind_names[services[i]])) { open_kind = services[i]; break; }
         if (!open_kind) return blocked(allowed);
     }
     if (!control && kind == LM && command == 0 && pid && data_size >= 8) open_kind = LOGGER;
+#ifndef NSW_BASIC_SERVICES
     if (!control && kind == NFP && command == 0) open_kind = NFP_USER;
     if (!control && kind == NFP_USER && command <= 1) {
         if (!command) {
@@ -658,6 +873,8 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, &work_size, sizeof work_size)) *result = 0;
         return true;
     }
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_HEADLESS_AUDIO)
     if (!control && kind == AUD_MANAGER && ((command == 2 && data_size >= 8) || (command == 4 && data_size >= 16))) open_kind = AUD_DEVICE;
     if (!control && kind == AUD_DEVICE && command == 5) {
         const uint32_t channels = 2;
@@ -699,47 +916,8 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
         return true;
     }
-    if (!control && kind == FONTS && command <= 4) {
-        if (!initialize_fonts()) return blocked("shared font needs TrueType glyf/loca within 17 MiB (ZELDA_SHARED_FONT)");
-        if (command < 4) {
-            if (data_size < 4 || word(bytes, payload) >= 6) return true;
-            uint32_t value = command == 1 ? 1 : command == 2 ? font_size : 8;
-            if (reply(bytes, size, tipc, token, 0, domain, 0, &value, command ? 4 : 0)) *result = 0;
-        } else {
-            uint32_t handle = kernel_readonly_memory(font_memory, FONT_MEMORY_SIZE);
-            if (!handle) { *result = 0xce01; return true; }
-            if (reply(bytes, size, tipc, token, handle, domain, 0, NULL, 0)) {
-                uint32_t descriptor = 2; memcpy(bytes + 8, &descriptor, 4); *result = 0;
-            } else { uint64_t regs[31] = {handle}; kernel_svc(0x16, regs); }
-        }
-        return true;
-    }
-    if (!control && kind == ACCOUNT && (command == 100 || command == 140 || command == 160)) {
-        if (!pid || data_size < 8) return true;
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
-        return true;
-    }
-    if (!control && kind == ACCOUNT && command == 150 && s->registered) {
-        const uint8_t switch_locked = 0;
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &switch_locked, sizeof switch_locked)) *result = 0;
-        return true;
-    }
-    if (!control && kind == ACCOUNT && (command == 5 || command == 101) && s->registered) {
-        if (data_size < 16 || memcmp(bytes + payload, preselected_user + 2, 16)) return true;
-        open_kind = command == 5 ? ACCOUNT_PROFILE : ACCOUNT_MANAGER;
-    }
-    if (!control && kind == ACCOUNT_PROFILE && command == 1) {
-        uint8_t profile[0x38] = {0}; memcpy(profile, preselected_user + 2, 16); memcpy(profile + 24, "Local Player", 13);
-        if (reply(bytes, size, tipc, token, 0, domain, 0, profile, sizeof profile)) *result = 0;
-        return true;
-    }
-    if (!control && kind == AOC && command == 50) {
-        // No add-on content is installed or mounted in this local title.
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APM && command == 0) open_kind = APM_SESSION;
-    if (!control && kind == TIME && command <= 4) open_kind = USER_CLOCK + command;
+#endif
+#ifndef NSW_BASIC_SERVICES
     if (!control && kind == PREPO && command == 10400) {
         static uint64_t session_id;
         if (!session_id) { arc4random_buf(&session_id, sizeof session_id); if (!session_id) session_id = 1; }
@@ -754,12 +932,12 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
     }
     if (!control && kind == TIME && command == 400) {
         if (data_size < 1 || bytes[payload] > 1 || receive_length != 0xd0) return true;
-        initialize_clock();
+        if (!initialize_clock()) { *result = 0xce01; return true; }
         uint8_t snapshot[0xd0] = {0}, calendar[32];
-        memcpy(snapshot, clock_page + 0x40, 32); memcpy(snapshot + 0x20, clock_page + 0x88, 32);
-        struct timespec now; if (clock_gettime(CLOCK_MONOTONIC, &now)) return true;
-        int64_t steady = now.tv_sec; memcpy(snapshot + 0x90, &steady, 8);
-        memcpy(snapshot + 0x98, clock_page + 16, 16);
+        memcpy(snapshot, clock_state.shared + 0x40, 32); memcpy(snapshot + 0x20, clock_state.shared + 0x88, 32);
+        int64_t nanoseconds; TimePoint point;
+        if (!clock_monotonic(&nanoseconds) || !time_clock_point(&clock_state, nanoseconds, &point)) { *result = 0xce01; return true; }
+        int64_t steady = point.seconds; memcpy(snapshot + 0x90, &point, sizeof point);
         for (unsigned i = 0; i < 2; i++) {
             int64_t offset; memcpy(&offset, snapshot + i * 32, 8);
             int64_t timestamp = steady + offset;
@@ -781,109 +959,64 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
         return true;
     }
+#endif
+    if (!control && kind == TIME && command <= 4) open_kind = USER_CLOCK + command;
+    if (!control && kind == TIME && (command == 100 || command == 200)) {
+        const uint8_t enabled = 0; // No automatic correction or network synchronization.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &enabled, 1)) *result = 0;
+        return true;
+    }
+    if (!control && (kind == USER_CLOCK || kind == NETWORK_CLOCK || kind == LOCAL_CLOCK) &&
+        (command == 0 || command == 2)) {
+        if (!initialize_clock()) { *result = 0xce01; return true; }
+        if (command == 2) {
+            if (reply(bytes, size, tipc, token, 0, domain, 0, &clock_state.system, sizeof clock_state.system)) *result = 0;
+        } else {
+            int64_t nanoseconds, seconds;
+            if (!clock_monotonic(&nanoseconds) || !time_clock_current(&clock_state, nanoseconds, &seconds)) { *result = 0xce01; return true; }
+            if (reply(bytes, size, tipc, token, 0, domain, 0, &seconds, sizeof seconds)) *result = 0;
+        }
+        return true;
+    }
+    if (!control && kind == STEADY_CLOCK && (command == 0 || command == 200)) {
+        if (!initialize_clock()) { *result = 0xce01; return true; }
+        int64_t nanoseconds; TimePoint point;
+        if (!clock_monotonic(&nanoseconds) || !time_clock_point(&clock_state, nanoseconds, &point)) { *result = 0xce01; return true; }
+        const int64_t offset = 0;
+        if (reply(bytes, size, tipc, token, 0, domain, 0, command ? (const void *)&offset : (const void *)&point,
+                  command ? sizeof offset : sizeof point)) *result = 0;
+        return true;
+    }
     if (!control && kind == TIME && command == 20) {
-        initialize_clock();
-        uint32_t handle = kernel_readonly_page(clock_page);
+        if (!initialize_clock()) { *result = 0xce01; return true; }
+        uint32_t handle = kernel_readonly_page(clock_state.shared);
         if (!handle) { *result = 0xce01; return true; }
         if (reply(bytes, size, tipc, token, handle, domain, 0, NULL, 0)) {
             uint32_t descriptor = 2; memcpy(bytes + 8, &descriptor, 4); *result = 0;
         } else { uint64_t regs[31] = {handle}; kernel_svc(0x16, regs); }
         return true;
     }
-    if (!control && kind == PCTL && (command == 0 || command == 1) && pid && data_size >= 8) open_kind = PCTL_SESSION;
-    if (!control && kind == PCTL_SESSION && command == 1) {
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
+    if (!control && kind == APM && command == 0) open_kind = APM_SESSION;
+    if (!control && kind == APM && command == 1) {
+        const uint32_t mode = 1; // Keep the docked graphics profile for performance comparisons.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &mode, sizeof mode)) *result = 0;
         return true;
     }
-    if (!control && kind == FS && command == 1 && pid && data_size >= 8) {
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
-        return true;
-    }
-    if (!control && kind == FS && command == 1005 && s->registered) {
-        const uint32_t access_log_mode = 0; // Filesystem path logging is disabled.
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &access_log_mode, sizeof access_log_mode)) *result = 0;
-        return true;
-    }
-    if (!control && kind == FS && command == 200 && s->registered) {
-        if (!open_romfs()) return false;
-        open_kind = ROM_STORAGE;
-    }
-    if (!control && kind == FS && command == 51 && s->registered) {
-        if (data_size < 0x48) return true;
-        fprintf(stderr, "SAVE mount space=%u type=%u has_user=%u program=%llx\n", bytes[payload], bytes[payload + 0x28],
-            !!(wide(bytes, payload + 0x10) | wide(bytes, payload + 0x18)), wide(bytes, payload + 8));
-        bool temporary = bytes[payload] == 3 && bytes[payload + 0x28] == 4;
-        bool savedata = bytes[payload] == 1 && bytes[payload + 0x28] == 1 && !memcmp(bytes + payload + 0x10, preselected_user + 2, 16);
-        bool cache = bytes[payload] == 1 && bytes[payload + 0x28] == 5;
-        uint16_t index; memcpy(&index, bytes + payload + 0x2a, 2);
-        uint64_t program = wide(bytes, payload + 8);
-        if ((!temporary && !savedata && !cache) || (cache && index >= FILESYSTEM_CACHE_COUNT)) return blocked("unsupported save mount identity");
-        if (program && program != 0x0100f2c0115b6000ull) {
-            // Only this title has local storage; optional imports from other games are absent.
-            if (reply_status(bytes, size, tipc, token, domain, 0x7d402)) *result = 0; // Fs TargetNotFound, not PathNotFound.
-            return true;
+    if (!control && kind == APM_SESSION && command <= 1 && data_size >= (command ? 4u : 8u)) {
+        uint32_t mode = word(bytes, payload);
+        if (mode > 1) return blocked("invalid performance mode");
+        if (!command) {
+            uint32_t config = word(bytes, payload + 4);
+            if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) {
+                performance_config[mode] = config; performance_config_set[mode] = true; *result = 0;
+            }
+        } else {
+            if (!performance_config_set[mode]) return blocked("unconfigured performance mode");
+            if (reply(bytes, size, tipc, token, 0, domain, 0, &performance_config[mode], 4)) *result = 0;
         }
-        opened_value = cache ? FILESYSTEM_CACHE_BASE + index : temporary;
-        uint64_t cache_size;
-        uint32_t status = cache ? filesystem_cache_info(index, &cache_size) : 0;
-        if (!status) status = filesystem_mount(opened_value);
-        if (status) { if (reply_status(bytes, size, tipc, token, domain, status)) *result = 0; return true; }
-        open_kind = cache ? CACHE_FS : temporary ? TEMP_FS : SAVE_FS;
-    }
-    if (!control && kind == FS && command == 62 && s->registered) open_kind = CACHE_READER;
-    if (!control && kind == FS && command == 33 && s->registered) {
-        if (data_size < 2) return true;
-        uint16_t index; memcpy(&index, bytes + payload, 2);
-        if (reply_status(bytes, size, tipc, token, domain, filesystem_cache_delete(index))) *result = 0;
-        return true;
-    }
-    if (!control && kind == ROM_STORAGE && command == 4) {
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &romfs_size, sizeof romfs_size)) *result = 0;
         return true;
     }
     if (!control && kind == APPLET && command == 0 && pid && copied && data_size >= 8) open_kind = APP_PROXY;
-    if (!control && kind == APPLICATION && command == 21) {
-        // shortcut: use the reference host's Simplified Chinese default until a language setting exists.
-        const char language[8] = "zh-Hans";
-        if (reply(bytes, size, tipc, token, 0, domain, 0, language, sizeof language)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APPLICATION && command == 22 && data_size >= 4) {
-        fprintf(stderr, "APPLICATION terminate result=%x\n", word(bytes, payload));
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APPLICATION && command == 23) {
-        const char version[16] = "1.4.3";
-        if (reply(bytes, size, tipc, token, 0, domain, 0, version, sizeof version)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APPLICATION && command == 27) {
-        if (data_size < 24) return true;
-        uint16_t index; memcpy(&index, bytes + payload, 2);
-        uint32_t status = filesystem_cache_create(index, wide(bytes, payload + 8), wide(bytes, payload + 16));
-        const struct { uint32_t media, reserved; uint64_t required; } out = {1, 0, 0};
-        if (status) { if (reply_status(bytes, size, tipc, token, domain, status)) *result = 0; }
-        else if (reply(bytes, size, tipc, token, 0, domain, 0, &out, sizeof out)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APPLICATION && command == 40) {
-        const uint8_t ready = 1; // NotifyRunning: this local host has no HOME-menu transition to wait for.
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &ready, sizeof ready)) *result = 0;
-        return true;
-    }
-    if (!control && kind == APPLICATION && command == 1 && data_size >= 4) {
-        if (word(bytes, payload) == 2 && preselected_user_pending) open_kind = LAUNCH_STORAGE;
-        else {
-            if (reply_status(bytes, size, tipc, token, domain, 0x480)) *result = 0;
-            return true;
-        }
-    }
-    if (!control && kind == APPLICATION && command == 123) {
-        const int32_t previous_program = -1; // First launch, not an ExecuteProgram transition.
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &previous_program, sizeof previous_program)) *result = 0;
-        return true;
-    }
     if (!control && kind == APP_PROXY) {
         switch (command) {
             case 0: open_kind = COMMON_STATE; break;
@@ -896,11 +1029,6 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
             case 1000: open_kind = DEBUG; break;
         }
     }
-    if (!control && kind == APM && command == 1) {
-        const uint32_t mode = 1; // Keep the docked graphics profile for performance comparisons.
-        if (reply(bytes, size, tipc, token, 0, domain, 0, &mode, sizeof mode)) *result = 0;
-        return true;
-    }
     if (!control && ((kind == WINDOW && command == 1) ||
                      (kind == COMMON_STATE && (command == 5 || command == 6 || command == 9)) ||
                      (kind == SELF && command == 90))) {
@@ -910,16 +1038,23 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         if (reply(bytes, size, tipc, token, 0, domain, 0, &value, length)) *result = 0;
         return true;
     }
+#ifndef NSW_BASIC_SERVICES
     if (!control && kind == COMMON_STATE && command == 900) {
         if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) {
             request_exit_on_execute = true; *result = 0;
         }
         return true;
     }
-    if (!control && kind == COMMON_STATE && command == 66 && data_size >= 4) {
+#endif
+    if (!control && kind == COMMON_STATE && command == 66) {
+        if (data_size < 4) return true;
         uint32_t mode = word(bytes, payload);
         if (mode > 2) return blocked("invalid CPU boost mode");
-        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { cpu_boost_mode = mode; *result = 0; }
+        // Retain the guest performance hint. Host clocks are controlled by the OS.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) {
+            if (cpu_boost_mode != mode) fprintf(stderr, "SERVICE CPU boost hint %u -> %u (OS clock policy)\n", cpu_boost_mode, mode);
+            cpu_boost_mode = mode; *result = 0;
+        }
         return true;
     }
     if (!control && kind == WINDOW && command == 10) {
@@ -964,6 +1099,43 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         }
         return true;
     }
+    if (!control && kind == HID && (command == 122 || command == 123 || command == 124)) {
+        if (!pid || data_size < (command == 123 ? 24u : 16u)) return true;
+        unsigned index = hid_index(word(bytes, payload));
+        if (index >= 10 || (command == 123 && wide(bytes, payload + 16) > 1)) return true;
+        uint8_t mode = command == 124 ? 0 : 1;
+        if (hid_assignment[index] != mode) {
+            hid_assignment[index] = mode;
+            if (hid_notifications[index].write) { uint64_t regs[31] = {hid_notifications[index].write}; kernel_svc(0x11, regs); }
+        }
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
+        return true;
+    }
+    if (!control && kind == HID && (command == 120 || command == 121)) {
+        if (!pid || data_size < (command == 120 ? 16u : 8u)) return true;
+        if (command == 120) {
+            if (wide(bytes, payload) > 1) return true;
+            hid_hold = wide(bytes, payload);
+        }
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &hid_hold, command == 121 ? sizeof hid_hold : 0)) *result = 0;
+        return true;
+    }
+    if (!control && kind == HID && command == 106) {
+        if (!pid || data_size < 24) return true;
+        unsigned index = hid_index(word(bytes, payload));
+        if (index >= 10) return true;
+        uint32_t *write = &hid_notifications[index].write, *read = &hid_notifications[index].read;
+        if (!*read) {
+            if (!kernel_event_create(write, read)) { *result = 0xce01; return true; }
+            uint64_t regs[31] = {*write}; kernel_svc(0x11, regs); // Initial style snapshot is available.
+        }
+        uint32_t copy = kernel_event_copy(*read);
+        if (!copy) { *result = 0xce01; return true; }
+        if (reply(bytes, size, tipc, token, copy, domain, 0, NULL, 0)) {
+            uint32_t descriptor = 2; memcpy(bytes + 8, &descriptor, sizeof descriptor); *result = 0;
+        } else { uint64_t regs[31] = {copy}; kernel_svc(0x16, regs); }
+        return true;
+    }
     if (!control && ((kind == SELF && command == 91) || (kind == COMMON_STATE && command == 0) ||
                      (kind == APPLICATION && (command == 130 || command == 210)) ||
                      (kind == AUD_DEVICE && (command == 4 || command == 11 || command == 12)) || (kind == NFP_USER && command == 23))) {
@@ -981,21 +1153,94 @@ static bool request(uint32_t handle, void *buffer, size_t size, uint32_t *result
         } else { uint64_t regs[31] = {copy}; kernel_svc(0x16, regs); }
         return true;
     }
-    if (!control && kind == APM_SESSION && command <= 1 && data_size >= (command ? 4u : 8u)) {
-        uint32_t mode = word(bytes, payload);
-        if (mode > 1) return blocked("invalid performance mode");
-        if (!command) {
-            uint32_t config = word(bytes, payload + 4);
-            if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) {
-                performance_config[mode] = config; performance_config_set[mode] = true; *result = 0;
-            }
-        } else {
-            if (!performance_config_set[mode]) return blocked("unconfigured performance mode");
-            if (reply(bytes, size, tipc, token, 0, domain, 0, &performance_config[mode], 4)) *result = 0;
-        }
+    if (!control && kind == AOC && command == 50) {
+        // No add-on content is installed or mounted in this local title.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
         return true;
     }
+    if (!control && kind == PCTL && (command == 0 || command == 1) && pid && data_size >= 8) open_kind = PCTL_SESSION;
+    if (!control && kind == PCTL_SESSION && command == 1) {
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
+        return true;
+    }
+    if (!control && kind == FS && command == 1 && pid && data_size >= 8) {
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) { s->registered = true; *result = 0; }
+        return true;
+    }
+    if (!control && kind == FS && command == 1005 && s->registered) {
+        const uint32_t access_log_mode = 0; // Filesystem path logging is disabled.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &access_log_mode, sizeof access_log_mode)) *result = 0;
+        return true;
+    }
+    if (!control && kind == FS && command == 200 && s->registered) {
+        if (!open_romfs()) return false;
+        open_kind = ROM_STORAGE;
+    }
+    if (!control && kind == ROM_STORAGE && command == 4) {
+        uint64_t total = romfs_size(romfs);
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &total, sizeof total)) *result = 0;
+        return true;
+    }
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_SCRATCH_FS)
+    if (!control && kind == FS && command == 51 && s->registered) {
+        if (data_size < 0x48) return true;
+        fprintf(stderr, "SAVE mount space=%u type=%u has_user=%u program=%llx\n", bytes[payload], bytes[payload + 0x28],
+            !!(wide(bytes, payload + 0x10) | wide(bytes, payload + 0x18)), wide(bytes, payload + 8));
+        bool temporary = bytes[payload] == 3 && bytes[payload + 0x28] == 4;
+        bool savedata = bytes[payload] == 1 && bytes[payload + 0x28] == 1 && !memcmp(bytes + payload + 0x10, preselected_user + 2, 16);
+        bool cache = bytes[payload] == 1 && bytes[payload + 0x28] == 5;
+        uint16_t index; memcpy(&index, bytes + payload + 0x2a, 2);
+        uint64_t program = wide(bytes, payload + 8);
+        if ((!temporary && !savedata && !cache) || (cache && index >= FILESYSTEM_CACHE_COUNT)) return blocked("unsupported save mount identity");
+        if (program && program != program_id) {
+            // Only this title has local storage; optional imports from other games are absent.
+            if (reply_status(bytes, size, tipc, token, domain, 0x7d402)) *result = 0; // Fs TargetNotFound, not PathNotFound.
+            return true;
+        }
+        opened_value = cache ? FILESYSTEM_CACHE_BASE + index : temporary;
+        uint64_t cache_size;
+        uint32_t status = cache ? filesystem_cache_info(index, &cache_size) : 0;
+        if (!status) status = filesystem_mount(opened_value);
+        if (status) { if (reply_status(bytes, size, tipc, token, domain, status)) *result = 0; return true; }
+        open_kind = cache ? CACHE_FS : temporary ? TEMP_FS : SAVE_FS;
+    }
+#endif
+#ifndef NSW_BASIC_SERVICES
+    if (!control && kind == FS && command == 62 && s->registered) open_kind = CACHE_READER;
+    if (!control && kind == FS && command == 33 && s->registered) {
+        if (data_size < 2) return true;
+        uint16_t index; memcpy(&index, bytes + payload, 2);
+        if (reply_status(bytes, size, tipc, token, domain, filesystem_cache_delete(index))) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 22 && data_size >= 4) {
+        fprintf(stderr, "APPLICATION terminate result=%x\n", word(bytes, payload));
+        if (reply(bytes, size, tipc, token, 0, domain, 0, NULL, 0)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 23) {
+        const char version[16] = "1.4.3";
+        if (reply(bytes, size, tipc, token, 0, domain, 0, version, sizeof version)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 27) {
+        if (data_size < 24) return true;
+        uint16_t index; memcpy(&index, bytes + payload, 2);
+        uint32_t status = filesystem_cache_create(index, wide(bytes, payload + 8), wide(bytes, payload + 16));
+        const struct { uint32_t media, reserved; uint64_t required; } out = {1, 0, 0};
+        if (status) { if (reply_status(bytes, size, tipc, token, domain, status)) *result = 0; }
+        else if (reply(bytes, size, tipc, token, 0, domain, 0, &out, sizeof out)) *result = 0;
+        return true;
+    }
+    if (!control && kind == APPLICATION && command == 123) {
+        const int32_t previous_program = -1; // First launch, not an ExecuteProgram transition.
+        if (reply(bytes, size, tipc, token, 0, domain, 0, &previous_program, sizeof previous_program)) *result = 0;
+        return true;
+    }
+#endif
+#if !defined(NSW_BASIC_SERVICES) || defined(NSW_SCRATCH_FS)
 create_object:
+#endif
     if (open_kind) {
         if (domain) {
             for (unsigned i = 0; i < 16; i++) if (!s->objects[i]) {
@@ -1044,7 +1289,7 @@ bool service_request(uint32_t handle, void *buffer, size_t size, uint32_t *resul
     bool handled = request(handle, buffer, size, result);
     if (handled && *result && getenv("ZELDA_IPC_LOG")) {
         unsigned command = UINT32_MAX;
-        for (size_t p = 8; p + 12 <= size; p += 4) if (word(buffer, p) == 0x49434653) { command = word(buffer, p + 8); break; }
+        for (size_t p = 8; buffer && p + 12 <= size; p += 4) if (word(buffer, p) == 0x49434653) { command = word(buffer, p + 8); break; }
         fprintf(stderr, "IPC rejected command=%u result=%x\n", command, *result);
     }
     pthread_mutex_unlock(&services_lock);
@@ -1055,6 +1300,15 @@ void service_shutdown(void) {
     pthread_mutex_lock(&services_lock);
     for (size_t i = 0; i < sizeof sessions / sizeof *sessions; i++)
         if (sessions[i].context) close_session(sessions[i].handle);
-    close_romfs();
+    close_romfs(); close_fonts();
+    for(unsigned i=0;i<10;i++) {
+        uint64_t regs[31]={hid_notifications[i].read}; if(regs[0]) kernel_svc(0x16,regs);
+        regs[0]=hid_notifications[i].write; if(regs[0]) kernel_svc(0x16,regs);
+    }
+    memset(hid_notifications,0,sizeof hid_notifications);
+    memset(hid_assignment,0,sizeof hid_assignment); hid_hold=0;
+#ifdef NSW_SCRATCH_FS
+    filesystem_shutdown();
+#endif
     pthread_mutex_unlock(&services_lock);
 }

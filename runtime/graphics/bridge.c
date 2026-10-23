@@ -1,8 +1,13 @@
 #include "dispatch.h"
 #include "nvn_bridge.h"
 #include "host_compat.h"
+#ifndef NSW_VULKAN
 #include "nvn_mtl.h"
+#endif
+#if !defined(NSW_VULKAN) || defined(NSW_VULKAN_VIDEO)
 #include "movie.h"
+#endif
+#include "guest_callback.h"
 
 // Tokens occupy no executable host pages and cannot alias the mapped guest modules.
 #define NVN_BASE 0x7f00000000ull
@@ -17,7 +22,12 @@ uint64_t nvn_guest_address(const char *name) {
 
 GuestFn rt_find_external(uint64_t address) {
     uint64_t offset = address - NVN_BASE;
-    return !(offset & 3) && offset / 4 < nvn_bridge_count ? nvn_bridge_entries[offset / 4].call : movie_find_function(address);
+    if (!(offset & 3) && offset / 4 < nvn_bridge_count) return nvn_bridge_entries[offset / 4].call;
+#if defined(NSW_VULKAN) && !defined(NSW_VULKAN_VIDEO)
+    return NULL;
+#else
+    return movie_find_function(address);
+#endif
 }
 
 void *nvn_bridge_native(size_t index) {
@@ -26,6 +36,10 @@ void *nvn_bridge_native(size_t index) {
 
 void nvn_bridge_unavailable(Cpu *c, const char *name) {
     fprintf(stderr, "unsupported NVN API: %s lr=%llx\n", name, (unsigned long long)c->x[30]);
+#ifdef NSW_VULKAN
+    extern void rt_report_graphics_error(Cpu *, const char *);
+    rt_report_graphics_error(c, name);
+#endif
     exit(78);
 }
 
@@ -36,28 +50,17 @@ uint64_t nvn_bridge_stack(Cpu *c, size_t offset) {
 }
 
 void nvn_guest_callback(uint64_t address, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
-    if (!nvn_bridge_cpu || !rt_find_function(address)) die("Invalid NVN guest callback");
-    Cpu callback = *nvn_bridge_cpu;
-    callback.pc = address; callback.x[30] = 0;
-    callback.excl_addr = UINT64_MAX;
-    callback.x[0] = a0; callback.x[1] = a1; callback.x[2] = a2; callback.x[3] = a3;
-    rt_dispatch(&callback);
-    if (callback.sp != nvn_bridge_cpu->sp) die("Unbalanced NVN callback stack");
-    nvn_bridge_cpu->fpsr = callback.fpsr;
+    const uint64_t arguments[] = {a0, a1, a2, a3};
+    if (!guest_callback(nvn_bridge_cpu, address, arguments, 4, NULL))
+        die("Invalid NVN guest callback or unbalanced callback stack");
 }
-
-static uint64_t allocators[2][4];
-void hle__ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_(Cpu *c) {
-    memcpy(allocators[0], c->x, sizeof allocators[0]);
-}
-void hle__ZN2nv28SetGraphicsDevtoolsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_(Cpu *c) {
-    memcpy(allocators[1], c->x, sizeof allocators[1]);
-}
+#ifndef NSW_VULKAN
 void hle__ZN2nv18InitializeGraphicsEPvm(Cpu *c) {
     if (!kernel_access(c->x[0], c->x[1], 3)) die("Invalid NV graphics transfer memory");
     mtl_init();
 }
 void hle__ZN2nv16FinalizeGraphicsEv(Cpu *c) { (void)c; mtl_finish(); }
+#endif
 void hle_nvnBootstrapLoader(Cpu *c) {
     char name[129];
     for (size_t i = 0; i < sizeof name; i++) {

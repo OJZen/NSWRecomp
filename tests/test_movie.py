@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 import shlex
 import struct
 import subprocess
@@ -10,6 +11,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import graphics
+from host import cpu_flags, executable
 from test_load import BASE, fixture
 
 
@@ -48,20 +50,31 @@ class MovieTests(unittest.TestCase):
                     self.assertIn(f'return {expected:#x}ull;', source)
 
     def test_decoding_and_compiled_cpu_protocol(self):
-        flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'vpx'], text=True, timeout=10))
+        if os.name == 'nt':
+            from prepare_vulkan_video import verified_dependency
+            _, flags = verified_dependency()
+        else:
+            flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', '--libs', 'vpx', 'vorbisenc'], text=True, timeout=10))
         with tempfile.TemporaryDirectory(prefix='movie-test-') as temp:
             for name in ('native_movie_video', 'native_movie'):
                 with self.subTest(name=name):
-                    binary = Path(temp) / name
-                    subprocess.run(['clang', '-std=gnu11', '-O2', '-g', '-fsanitize=address,undefined',
-                                    '-Wall', '-Wextra', '-Werror', '-pthread',
+                    binary = Path(temp) / executable(name)
+                    compile_result = subprocess.run(['clang', '-std=gnu11', '-O2', '-g', '-fsanitize=address,undefined',
+                                    '-Wall', '-Wextra', '-Werror', '-pthread', *cpu_flags(),
+                                    *(['-DNSW_VULKAN_VIDEO'] if name == 'native_movie' else []),
                                     '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'runtime/graphics/include'),
                                     '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
                                     str(ROOT / 'tests' / (name + '.c')),
-                                    str(ROOT / 'runtime/graphics/movie_video.c'), *flags,
-                                    '-o', str(binary)], check=True, capture_output=True, timeout=30)
+                                    str(ROOT / 'runtime/graphics/movie_video.c'),
+                                    str(ROOT / 'runtime/graphics/movie_audio.c'), *flags,
+                                    '-o', str(binary)], capture_output=True, text=True, timeout=30)
+                    self.assertEqual(compile_result.returncode, 0, compile_result.stderr)
                     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    if name == 'native_movie':
+                        for mode in ('texture', 'audio'):
+                            result = subprocess.run([str(binary), mode], capture_output=True, text=True, timeout=20)
+                            self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__':

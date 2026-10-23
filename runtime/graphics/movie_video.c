@@ -3,6 +3,8 @@
 #include "movie_video.h"
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <stdbool.h>
 #include <vpx/vp8dx.h>
 #include <vpx/vpx_decoder.h>
 
@@ -51,4 +53,35 @@ int zelda_video_frame(zelda_video *video, uint8_t *nv12, size_t capacity, int *w
     }
     *width = w; *height = h;
     return 1;
+}
+
+static uint8_t rgba_channel(float value) {
+    return (uint8_t)lroundf(fmaxf(0, fminf(1, value)) * 255);
+}
+int zelda_video_frame_rgba(zelda_video *video, uint8_t *rgba, size_t capacity, int *width, int *height) {
+    vpx_image_t *image = vpx_codec_get_frame(&video->codec, &video->iter);
+    if (!image) return 0;
+    if (image->fmt != VPX_IMG_FMT_I420 || image->x_chroma_shift != 1 || image->y_chroma_shift != 1) return -1;
+    unsigned w = image->d_w, h = image->d_h;
+    if (!w || !h || w > 8192 || h > 8192 || (size_t)w * h * 4 > capacity) return -2;
+    float kr, kb;
+    switch (image->cs) {
+    case VPX_CS_UNKNOWN: case VPX_CS_BT_601: case VPX_CS_SMPTE_170: kr = .299f; kb = .114f; break;
+    case VPX_CS_BT_709: kr = .2126f; kb = .0722f; break;
+    case VPX_CS_SMPTE_240: kr = .212f; kb = .087f; break;
+    case VPX_CS_BT_2020: kr = .2627f; kb = .0593f; break;
+    default: return -1;
+    }
+    bool full = image->range == VPX_CR_FULL_RANGE;
+    float y_scale = 1.f / (full ? 255 : 219), c_scale = 1.f / (full ? 255 : 224);
+    float gu = 2 * kb * (1 - kb) / (1 - kr - kb), gv = 2 * kr * (1 - kr) / (1 - kr - kb);
+    for (unsigned y = 0; y < h; y++) for (unsigned x = 0; x < w; x++) {
+        float luma = (image->planes[0][(size_t)y * image->stride[0] + x] - (full ? 0 : 16)) * y_scale;
+        float u = (image->planes[1][(size_t)(y / 2) * image->stride[1] + x / 2] - 128) * c_scale;
+        float v = (image->planes[2][(size_t)(y / 2) * image->stride[2] + x / 2] - 128) * c_scale;
+        uint8_t *p = rgba + ((size_t)y * w + x) * 4;
+        p[0] = rgba_channel(luma + 2 * (1 - kr) * v); p[1] = rgba_channel(luma - gu * u - gv * v);
+        p[2] = rgba_channel(luma + 2 * (1 - kb) * u); p[3] = 255;
+    }
+    *width = (int)w; *height = (int)h; return 1;
 }

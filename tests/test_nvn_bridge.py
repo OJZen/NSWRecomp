@@ -1,12 +1,17 @@
 from pathlib import Path
-import subprocess
 import sys
+import subprocess
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from nvn_bridge import HEADERS, generate
+from host import cpu_flags, executable
+
+
+def lto_flags(directory):
+    return ['-Xlinker', '-object_path_lto', '-Xlinker', str(directory / 'lto')] if sys.platform == 'darwin' else []
 
 HEADER = '''#include <stdint.h>
 typedef enum { NVNmodeA = 1 } NVNmode;
@@ -31,14 +36,14 @@ typedef NVNopaque (*NVNT_unsupported)(void);
 class NvnBridgeTests(unittest.TestCase):
     def test_guest_tokens_and_callback_state_isolation(self):
         with tempfile.TemporaryDirectory(prefix='graphics-bridge-test-') as temp:
-            binary = Path(temp) / 'check'
+            binary = Path(temp) / executable('check')
             subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-g', '-fsanitize=address,undefined',
-                            '-Wall', '-Wextra', '-Werror', '-I', str(ROOT / 'runtime'),
+                            '-Wall', '-Wextra', '-Werror', *cpu_flags(), '-I', str(ROOT / 'runtime'),
                             '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
                             '-I', str(ROOT / 'runtime/graphics'),
                             '-I', str(ROOT / 'runtime/graphics/include'), '-I', str(ROOT / 'runtime/graphics/nvn'),
-                            str(ROOT / 'runtime/graphics/bridge.c'), str(ROOT / 'tests/native_graphics_bridge.c'),
-                            '-Xlinker', '-object_path_lto', '-Xlinker', str(Path(temp) / 'lto'),
+                            str(ROOT / 'runtime/graphics/bridge.c'), str(ROOT / 'runtime/guest_callback.c'),
+                            str(ROOT / 'tests/native_graphics_bridge.c'), *lto_flags(Path(temp)),
                             '-o', str(binary)], check=True, capture_output=True, timeout=30)
             for args, code in (([], 0), (['unbalanced'], 78)):
                 result = subprocess.run([str(binary), *args], capture_output=True, text=True, timeout=5)
@@ -52,7 +57,7 @@ class NvnBridgeTests(unittest.TestCase):
             path = directory / 'bridge.c'
             path.write_text(source)
             subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-Wall', '-Wextra', '-Werror',
-                            '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
+                            *cpu_flags(), '-I', str(ROOT / 'runtime'), '-I', str(ROOT / 'third_party/lasrecomp/runtime'),
                             '-I', str(HEADERS), '-I', str(HEADERS / 'include'),
                             '-c', str(path), '-o', str(directory / 'bridge.o')], check=True, timeout=30, capture_output=True)
 
@@ -64,12 +69,12 @@ class NvnBridgeTests(unittest.TestCase):
             (directory / 'nvn_protos.h').write_text(HEADER + PROTOTYPES)
             path = directory / 'bridge.c'
             path.write_text(source)
-            binary = directory / 'check'
+            binary = directory / executable('check')
             subprocess.run(['clang', '-std=gnu11', '-O2', '-flto=thin', '-Wall', '-Wextra', '-Werror',
-                            '-I', str(directory), '-I', str(ROOT / 'runtime'),
+                            *cpu_flags(), '-I', str(directory), '-I', str(ROOT / 'runtime'),
                             '-I', str(ROOT / 'third_party/lasrecomp/runtime'), str(path),
                             str(ROOT / 'tests/native_nvn_bridge.c'),
-                            '-Xlinker', '-object_path_lto', '-Xlinker', str(directory / 'lto'), '-o', str(binary)],
+                            *lto_flags(directory), '-o', str(binary)],
                            check=True, timeout=30, capture_output=True)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)

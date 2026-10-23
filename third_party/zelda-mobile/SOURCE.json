@@ -5,11 +5,36 @@
   "files": {
     "host/kernel.c": {
       "sha256": "1b6c9ae12e6468ab347c8223497b69ec00290c01edea26f128afa3f3e5cbb379",
-      "adapted_as": "runtime/kernel.c"
+      "adapted_as": "runtime/kernel.c",
+      "local_adaptations": {
+        "note": "NSWRecomp kernel memory operations use a Windows/Mach host boundary; original source revision and hash above are unchanged.",
+        "lf_sha256": {
+          "runtime/kernel.c": "7236d92a6799607a789b2fbd40e26803d79844793c2f2b5e6aa5a17b946865d4",
+          "runtime/host.c": "6aedd2575dbca0107266073f3f52d29dec5c275d4fe374e8a3099bc808047968",
+          "runtime/host.h": "1b3071bddec82989a270bc9a080644fe904a0ec6d04392b99a2be05aa17cb933"
+        }
+      }
     },
     "host/services.c": {
       "sha256": "0c7d08fe1af97a5655245ac58943c62a102157be7fc45f803dd6b2db17192d67",
-      "adapted_as": "runtime/services.c"
+      "adapted_as": "runtime/services.c",
+      "local_adaptations": {
+        "note": "Shared CMIF/TIPC and session ownership support basic initialization without save/audio dependencies. Bounded NPDM metadata selects client services. CPU boost requests retain guest hints; host clocks remain OS controlled. Read-only time IPC and shared-memory clocks share an immutable wall/monotonic anchor; calendar and timezone rules remain outside basic mode. Read-only RomFS storage uses a portable file boundary; Windows startup inherits the verified locked file handle. Windows initialization adds bounded offline account/settings, selected program identity, neutral HID events, explicit read-only host-font substitution and optional silent AudioRenderer IPC. The optional silent AudioOut IPC dispatch and queue in audio_out.* / audio_out_ipc.inc are original NSWRecomp MIT code; they track buffer lifetime and elapsed PCM without playback.",
+        "lf_sha256": {
+          "runtime/services.c": "dd2b29f5148f8bcb4fb79d23c4624a4452451f98e2630681c4ebdf210b671b9f",
+          "runtime/services.h": "d1ba0b35e35306a20f55b9a4b776b7d58410d37e614680bed5f5a43c5b112188",
+          "tests/native_ipc.c": "ae78e438ab084c1decd6df95d21d8776d5e6d7e4aff907d05a0c3f62443ce0c3",
+          "runtime/time_clock.c": "4df16fa4d29b8fff61814b880735b1f95f12459fb9f1970f3a9e8909c54b82a7",
+          "runtime/time_clock.h": "be23e909a7dccf6a6aca013e0170347ab992634cf1fdceb4187605ccba4dfaa5",
+          "tests/native_time_clock.c": "2852f3ebc6af26a64e4a5570e5fb6865036e13edde7ffd3cbd3fbc9450856116",
+          "runtime/romfs.c": "60e8ae41ad73dcac8236b9830c93f38740313a0dabdcf72f7e341de508aad473",
+          "runtime/romfs.h": "cc940b32f5a5da62ad2f6bb31f4044e32554ab9c98abcda49df6d16fffe87a9e",
+          "tests/test_ipc.py": "6ca6a08715e77a1a27d93976ab8afdae6af316b89465a5542f5482cde2fa6db4",
+          "runtime/audio_out.c": "714608423971c7778b17173162bc2dcfceb3bc444539c698932acbd83d6ad6ca",
+          "runtime/audio_out.h": "2e643674d7025659bf102aba6099f48c4e65f870d8dad798d168dc386bdc2341",
+          "runtime/audio_out_ipc.inc": "dd23f0de73c27d69320ac13540472d51c8dfe6bd22d3097c5d8656d1d161bb37"
+        }
+      }
     },
     "host/services.h": {
       "sha256": "9b3948c08f634d2668db1b00fd34ae38a0d4723cabbf04b63e38ab50a138e767",
@@ -41,7 +66,15 @@
     },
     "host/audio_voice.h": {
       "sha256": "0c85c0094a74ac1bf4bfb09a7c441473d9f7d6dada382eebfb07bffb9c2132da",
-      "adapted_as": "runtime/audio_voice.h"
+      "adapted_as": "runtime/audio_voice.h",
+      "local_adaptations": {
+        "note": "Headless AudioRenderer reuses the cursor/ownership logic with REV1-15 input layouts, a 5 ms monotonic clock and copied kernel events. It performs no mixing, decoding, DSP or host playback.",
+        "lf_sha256": {
+          "runtime/audio_headless.c": "f5bfcb1c3b0507d617cd5c6f5875895a625c08ab91be1e8b14eee65125b2505b",
+          "tests/native_audio_headless.c": "c86807961ee26a6f8a8e3b179d177c4a8466e3a6330d2f2e27af0c8eaca550e7",
+          "tests/test_audio_headless.py": "f1757fe05ad91b32f9b9a18aab5901584744f59c166f5dc56541ee930a834a34"
+        }
+      }
     },
     "host/audio_output.inc": {
       "sha256": "c480f9256e2784fa55c66d9adbfb3cc560907f34ee1c3c915d4751aac2efb695",
@@ -64,7 +97,14 @@
       "sha256": "92f7b7b824156d3e467ee465a4cf8c4ee6527779a52fc90b02adacf342ebb782",
       "adapted_as": "runtime/threads.c",
       "license": "MIT",
-      "use": "Thread and synchronization algorithms adapted to Cpu dispatch, retained wait references and cooperative shutdown."
+      "use": "Thread and synchronization algorithms adapted to Cpu dispatch, retained wait references and cooperative shutdown.",
+      "local_adaptations": {
+        "note": "Windows bounded initialization adds atomic per-thread trace snapshots and optional captured wait frames without changing condition-variable timeout ownership.",
+        "lf_sha256": {
+          "runtime/threads.c": "6dbea0c4a1c609aefaa1ebcbd421c5762aaeb1dae5e252114ab71654a6fdd76c",
+          "runtime/threads.h": "b8b868aca8af31c4ff9c9e385acd9c85e6ade7f097f0cc56de50cfb98e60166c"
+        }
+      }
     },
     "core/gfx/nvn/nvn_protos.h": {
       "sha256": "547b6c48d9424600bb16686767b9965427fff233de04b7eb4ffc74a9266cfa76",
@@ -79,7 +119,27 @@
     "core/gfx/nvn/hle_nvn.c": {
       "sha256": "b04c5f5de819f548416d335e7d9c3f3ac68d6b5b52577e6a2bc4878bebc83a21",
       "adapted_as": "runtime/graphics/nvn/hle_nvn.c",
-      "license": "MIT"
+      "license": "MIT",
+      "local_adaptations": {
+        "note": "Windows Vulkan resources and state setters adapt the MIT NVN subset. Local additions provide checked memory, immutable commands, bounded exact-source shader packets, image/depth operations, compute and indexed draws with standard blending and offscreen frame readback. Desktop presentation remains separate.",
+        "lf_sha256": {
+          "runtime/vulkan_bridge.c": "8676f0eb7e2f08550853c7aa85ca8c448d8b80fbfc730b1f899ae92f1bb9ffe5",
+          "runtime/vulkan_nvn.inc": "33914c7065cf3298ae89fb2d05686ef44204142be612bb46d83e4d98271f9ed6",
+          "runtime/vulkan_nvn_entries.inc": "5313faab6e95bb8d727dd22ace858cd9917c201d39100fb3e5d38cf2b1475c3b",
+          "runtime/vulkan_texture.inc": "8e8df873ba4d814ab6bcbccc423ffa3f007db936f834fbfcefebc6cc15be8cd9",
+          "runtime/vulkan_texture_io.inc": "b353746b1d54ded5aba1727e75b0681effbb4ef2a1891bcf9b624486522171d4",
+          "runtime/vulkan_descriptor.inc": "9671fc57fa1d55d5942473d46d8a807e0796fa46962cfcb955474062f5cbc04b",
+          "runtime/vulkan_program.inc": "0ddd1ffac08344de8ebe00af49140e7d73aa330191546a8cdf34165deb29fc7c",
+          "runtime/vulkan_state.inc": "295e3c3e2ad398aea333cc7df0435cc2d062b6f9db682d22934233ebd23b4fbd",
+          "runtime/vulkan_commands.inc": "9d611d9ee4c1ab1c7b9e6da44d3d87055727aa0baa3c239c5daf69519140712c",
+          "tests/native_vulkan_nvn.c": "40dbc6f184c9e92299d8ad75e55315ff9effd3e520f254a8864826274ed97a3c",
+          "tests/test_vulkan_nvn.py": "cd4d627c75cc17d3a709ee131bbc1d5d2d2709ecb2083ee07da1c105b9fe2d0a",
+          "runtime/vulkan_shader_capture.inc": "487cb633dcc351534e516aa9f32a8da0301bd730a4681ddae9b3d76fd7f280b9",
+          "runtime/vulkan_shader.inc": "3e1cae69f098d1a82901f9d75c142797fa1d0700e94be6458febe4097ff8d8af",
+          "runtime/vulkan_draw_commands.inc": "6db0dcb04a3cd8b75cd4baa995c3bec0d2a2ceedc6dc075535ad2f72203f0d62",
+          "runtime/vulkan_shader_checks.h": "342a461bbb390584981ca7a99c01446e4c973f27950b87e5db31a9813b63619b"
+        }
+      }
     },
     "core/gfx/nvn/nvn_count.h": {
       "sha256": "bf9139519e016e6bf177a51ab012864c87068395cd73f090a1f9b5f46a564ed6",
@@ -114,7 +174,13 @@
     "core/gfx/nvn/nvn_obj.h": {
       "sha256": "b9f784b1f701a6f05e28f438acc2a66f9d57018ccd9cd342a8a7df64a05405cc",
       "adapted_as": "runtime/graphics/nvn/nvn_obj.h",
-      "license": "MIT"
+      "license": "MIT",
+      "local_adaptations": {
+        "note": "Windows view metadata stores depth/stencil-mode presence in unused flag bits, preserving the 16-byte ABI.",
+        "lf_sha256": {
+          "runtime/graphics/nvn/nvn_obj.h": "12ce9a4a24ae0a53d66bb3f254b27af7cbe0ec744923da974c058a16a5057ddc"
+        }
+      }
     },
     "core/gfx/nvn/nvn_pace.h": {
       "sha256": "9a2e8bf3494f62166db3311fb47d6ee375d03ec79d1876240b8522b7a85a04ba",
@@ -2482,12 +2548,25 @@
     "core/gfx/tools/dmsh_xlate/Program.cs": {
       "sha256": "1ba5bc41d670a2ea1647d2c2f77de805d72c3add673f7ce809e2e02449d8e196",
       "vendored_as": "third_party/zelda-mobile/core/gfx/tools/dmsh_xlate/Program.cs",
-      "license": "MIT"
+      "license": "MIT",
+      "local_adaptations": {
+        "note": "Separate Vulkan translator adaptation of the pinned MIT source: conservative capabilities, distinct descriptor sets, linked graphics stages, explicit coordinate modes and checked constants. The original vendored file is unchanged.",
+        "lf_sha256": {
+          "tools/vulkan_xlate/Program.cs": "bfaca1f60d619af54f569a411df4d13fe6e760c649034b25f7402fe7f449c866"
+        }
+      }
     },
     "core/gfx/tools/dmsh_xlate/dmsh_xlate.csproj": {
       "sha256": "cb98c2eea844b3a3e52aaefebcefc2d801dac2fdca557b6383c19b613756736a",
       "vendored_as": "third_party/zelda-mobile/core/gfx/tools/dmsh_xlate/dmsh_xlate.csproj",
-      "license": "MIT"
+      "license": "MIT",
+      "local_adaptations": {
+        "note": "Separate local .NET project reuses the pinned translator sources and workspace-local dependency/build paths.",
+        "lf_sha256": {
+          "tools/vulkan_xlate/dmsh_xlate.csproj": "cb98c2eea844b3a3e52aaefebcefc2d801dac2fdca557b6383c19b613756736a",
+          "tools/vulkan_xlate/NuGet.Config": "4770f0974d81c5cb73b3290f075bb632f97289a7115daa4c67d95b12321e9fe6"
+        }
+      }
     },
     "core/gfx/tools/dmsh_build.py": {
       "sha256": "946721c1123af1ed40baffee12d7f7f0d214b8047ff69583da014edf5dd09a74",
@@ -2527,7 +2606,16 @@
     "host/input.c": {
       "sha256": "4dfe949a7838da62ea33a5e65215172702d9236bfa3ac5306300db04ff8692a9",
       "adapted_as": "runtime/graphics/input.c",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "local_adaptations": {
+        "note": "Shared host-owned HID supports both single-state and bulk-state overloads. Windows exposes neutral FullKey state and portable events; no physical controller integration.",
+        "lf_sha256": {
+          "runtime/graphics/input.c": "09a1985a46147bcbc39c7f404eb84c90eb2134b443ea1b7e044e2a46bd4c136d",
+          "tests/test_input.py": "b702b1da4a8a116b57a9af94ea54276e05504d49a98af2235cfb6b35079e73e7",
+          "tests/native_input.c": "591f04c7c167b1b0329049465005122e1e8c60c700f81d2999ffc47e5267acb0",
+          "runtime/hle_symbols.inc": "459351ada3e8c213f645628d464655481f6761fb1ec0b57182027270b4eb5d13"
+        }
+      }
     },
     "host/codec.c": {
       "sha256": "4ff337cfaf6e2e38c31554737f352c8ca630c8747c3cc13b8adbc129cfb29a58",
@@ -2584,22 +2672,50 @@
     "host/movie.c": {
       "sha256": "8243a92652311c391c9054663044a9c6ad6b75abd9e639b68a5ab6b5786e233a",
       "adapted_as": "runtime/graphics/movie.c",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "local_adaptations": {
+        "lf_sha256": {
+          "runtime/graphics/movie.c": "fff00e34337cd3b48013c2814c377fc73035d63388e320ff69bb786993c6657d",
+          "runtime/graphics/movie.h": "cd49005fb9842ab901482be492b38bc60bcada34962844e8a6d1eebf7ce80e3c",
+          "runtime/graphics/movie_audio.c": "4ef0c1bbd221184521a5dec4e70b3ebb418813812d4d0c09830098a51b1c5843",
+          "runtime/graphics/movie_audio.h": "4101a652755a3db7990328a79b0de8f58b67909156305bb8c2fd9cc0e35e5059"
+        },
+        "note": "Compiled Cpu callbacks preserve SDK container/event/thread interfaces. Bounded VP8/VP9 decoding supports NV12 or an opaque NVN texture object for RGBA8 upload. Original NSWRecomp movie_audio.* adds libvorbis packet decoding and PCM16 output. Public tests synthesize video and six-channel audio; no game fixtures are distributed."
+      }
     },
     "host/movie_video.c": {
       "sha256": "c8cb5c8067b05b9a3406af8840c3cd1596eacc698f228efc5c793411479afb71",
       "adapted_as": "runtime/graphics/movie_video.c",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "local_adaptations": {
+        "lf_sha256": {
+          "runtime/graphics/movie_video.c": "5d949720f6c0a8483fe5d80249effc97441ca8436dc1e1dd15d26e3c60334b20"
+        },
+        "note": "Portable libvpx decoding retains NV12 and adds checked RGBA8 conversion using the frame matrix/range."
+      }
     },
     "host/movie_video.h": {
       "sha256": "41012eef752c287c42f9246eb60ab0c5263026b3163e19cf2cefc379da227493",
       "adapted_as": "runtime/graphics/movie_video.h",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "local_adaptations": {
+        "lf_sha256": {
+          "runtime/graphics/movie_video.h": "6a4d95e46a060a9d08df7e8ff29e0235f3364a5e9604fc533b05702bfebada88"
+        },
+        "note": "Portable libvpx decoding retains NV12 and adds checked RGBA8 conversion using the frame matrix/range."
+      }
     },
     "tests/test_movie.c": {
       "sha256": "7bf49f331e1245f6af89f544a70aedaa76e08a5bb761b503c8647512fac9278e",
       "adapted_as": "tests/native_movie.c",
-      "license": "Apache-2.0"
+      "license": "Apache-2.0",
+      "local_adaptations": {
+        "note": "Windows synthetic video checks use matching aligned allocation/free, portable compiler flags and the verified local libvpx build; source fixtures are synthetic.",
+        "lf_sha256": {
+          "tests/native_movie.c": "e3d29f446408bba8c6d18aa547d0b6eb00afbd02ff998a3d115178c59cc8cfde",
+          "tests/test_movie.py": "c954f95e0558cf457c3c759de5fa37de6d2a28f848645b396f53387a76659e6d"
+        }
+      }
     },
     "tests/test_movie_video.c": {
       "sha256": "475c6a5c670eafd047a7096e7f1dee08c82f95d9e0c89d8da521358f990a19e4",

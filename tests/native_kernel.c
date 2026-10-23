@@ -1,8 +1,10 @@
 #include "kernel.h"
+#include "host.h"
 #include <assert.h>
 #include <string.h>
-#include <sys/mman.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 typedef struct {
     uint64_t base, size;
@@ -24,16 +26,29 @@ static MemoryInfo query(uint64_t address) {
 }
 
 int main(void) {
+#ifndef _WIN32
     alarm(10);
-    unsigned char *memory = mmap(NULL, 0x20000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    assert(memory != MAP_FAILED);
+#endif
+    unsigned char *memory = host_reserve_guest(0x20000);
+    assert(memory && (uintptr_t)memory + 0x20000 < (1ull << 39));
+    assert(!host_protect(memory, 0x20000, 3));
+    uint64_t value = 0x12345678, copied = 0;
+    assert(host_write((uintptr_t)memory, &value, sizeof value));
+    assert(host_read(&copied, (uintptr_t)memory, sizeof copied) && copied == value);
+    assert(!host_protect(memory, host_page_size(), 1));
+    assert(!host_write((uintptr_t)memory, &value, sizeof value));
+    assert(host_read(&copied, (uintptr_t)memory, sizeof copied) && copied == value);
+    assert(!host_discard(memory, host_page_size()));
+    assert(!host_read(&copied, (uintptr_t)memory, sizeof copied));
+    assert(!host_protect(memory, host_page_size(), 3) && !*(uint64_t *)memory);
+    assert(host_protect(memory, host_page_size(), 5)); // Guest text stays NX.
     LoadedImage image = {.count = 1, .bytes = 0x10000};
     image.modules[0].header = (LoadHeader){.base = (uintptr_t)memory, .size = 0x10000,
         .text_size = 0xf00, .ro_offset = 0x4000, .ro_size = 0x800,
         .data_offset = 0x8000, .data_size = 0x1000, .bss_size = 0x1000};
     uint32_t handle;
     int result = kernel_init(&image, (uintptr_t)memory + 0x10000, 0x10000, &handle);
-    if (result) { munmap(memory, 0x20000); return result; }
+    if (result) { host_release(memory, 0x20000); return result; }
     assert(query((uintptr_t)memory).permission == 5);
     assert(query((uintptr_t)memory + 0x4000).permission == 1);
     assert(query((uintptr_t)memory + 0xfff).size == 0x1000);
@@ -93,6 +108,6 @@ int main(void) {
     memset(r, 0, sizeof r);
     assert(kernel_svc(8, r) && r[0] == 0xcc01);
     kernel_destroy();
-    munmap(memory, 0x20000);
+    assert(!host_release(memory, 0x20000));
     return 0;
 }

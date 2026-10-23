@@ -9,6 +9,7 @@ static int bool_missing;
 static unsigned invoked;
 static uint64_t wide(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e,
                      uint64_t f, uint64_t g, uint64_t h, uint64_t i, uint64_t j) {
+    assert(nvn_bridge_cpu && nvn_bridge_cpu->x[7] == 8);
     assert(a == 1 && b == 2 && c == 3 && d == 4 && e == 5 && f == 6 && g == 7 && h == 8 && i == 9 && j == 10);
     invoked++; return 0xfedcba9876543210ull;
 }
@@ -47,8 +48,10 @@ void *nvn_bridge_native(size_t index) {
 uint64_t nvn_bridge_stack(Cpu *cpu, size_t offset) { assert(offset <= 8); return LD64(cpu->sp + offset); }
 void nvn_bridge_unavailable(Cpu *cpu, const char *name) { (void)cpu; (void)name; exit(78); }
 static void call(const char *name, Cpu *cpu) {
+    Cpu previous = {0}; nvn_bridge_cpu = &previous;
     for (size_t i = 0; i < nvn_bridge_count; i++) if (!strcmp(nvn_bridge_entries[i].name, name)) {
-        nvn_bridge_entries[i].call(cpu); return;
+        nvn_bridge_entries[i].call(cpu);
+        assert(nvn_bridge_cpu == &previous); nvn_bridge_cpu = NULL; return;
     }
     abort();
 }

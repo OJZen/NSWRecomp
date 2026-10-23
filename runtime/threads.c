@@ -3,6 +3,7 @@
 #include "threads.h"
 #include "dispatch.h"
 #include "kernel.h"
+#include "host.h"
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -26,6 +27,7 @@ typedef struct Thread {
     pthread_cond_t changed;
     jmp_buf unwind;
     uint64_t entry, identifier, mask, wait_address, key, order;
+    atomic_uint_fast64_t trace_address, trace_lr, trace_x0, trace_svc, trace_wait[4], trace_frames[8];
     uint32_t handle, tag, result;
     int priority, core, wait;
     bool started, cancel, can_unwind, main_thread, quiescent;
@@ -37,6 +39,10 @@ static pthread_cond_t idle = PTHREAD_COND_INITIALIZER;
 static Thread *all;
 static _Thread_local Thread *current;
 static atomic_bool stopping;
+static bool trace_waits;
+// A bounded diagnostic history remains readable even when the scheduler mutex
+// is stuck. Entries contain no pointers to reclaimable Thread objects.
+static struct {atomic_uint_fast64_t id,pc,lr,x0,svc;} recent[128];
 static uint32_t next_handle = 0x01000000;
 static uint64_t next_identifier = 0x50, wait_order;
 static unsigned active;
@@ -175,6 +181,7 @@ uint32_t threads_init(void) {
     pthread_mutex_lock(&lock);
     if (current || active || all) abort();
     atomic_store(&stopping, false);
+    trace_waits=getenv("NSW_TRACE_WAITS")!=NULL;
     Thread *thread = new_thread();
     if (!thread) abort();
     thread->started = true; thread->priority = 44; thread->core = 0; thread->mask = 7;
@@ -197,6 +204,38 @@ void threads_checkpoint(void) {
 #endif
     while (atomic_load(&stopping)) pthread_cond_wait(&current->changed, &lock);
     current->quiescent = false;
+    pthread_mutex_unlock(&lock);
+}
+void threads_trace(uint64_t address,uint64_t lr,uint64_t x0) {
+    if(!current) return;
+    atomic_store_explicit(&current->trace_address,address,memory_order_relaxed);
+    atomic_store_explicit(&current->trace_lr,lr,memory_order_relaxed);
+    atomic_store_explicit(&current->trace_x0,x0,memory_order_relaxed);
+    unsigned slot=(unsigned)(current->identifier%128);
+    atomic_store(&recent[slot].id,current->identifier); atomic_store(&recent[slot].pc,address);
+    atomic_store(&recent[slot].lr,lr); atomic_store(&recent[slot].x0,x0);
+}
+void threads_dump(void) {
+    if(pthread_mutex_trylock(&lock)) {
+        fputs("THREAD diagnostics lock is busy; bounded recent traces follow\n",stderr);
+        for(unsigned i=0;i<128;i++) if(atomic_load(&recent[i].id)) fprintf(stderr,"THREAD recent id=%llx pc=%llx lr=%llx x0=%llx svc=%llx\n",
+            (unsigned long long)atomic_load(&recent[i].id),(unsigned long long)atomic_load(&recent[i].pc),
+            (unsigned long long)atomic_load(&recent[i].lr),(unsigned long long)atomic_load(&recent[i].x0),(unsigned long long)atomic_load(&recent[i].svc));
+        return;
+    }
+    for(Thread *t=all;t;t=t->next) if(t->started && !t->object.signaled) {
+        fprintf(stderr,"THREAD handle=%x main=%u wait=%d address=%llx key=%llx entry=%llx recent=%llx lr=%llx x0=%llx\n",
+            t->handle,t->main_thread,t->wait,(unsigned long long)t->wait_address,(unsigned long long)t->key,
+            (unsigned long long)t->entry,(unsigned long long)atomic_load(&t->trace_address),
+            (unsigned long long)atomic_load(&t->trace_lr),(unsigned long long)atomic_load(&t->trace_x0));
+        if(trace_waits) {
+            fprintf(stderr,"THREAD wait svc=%llx args=%llx,%llx,%llx,%llx frames=",(unsigned long long)atomic_load(&t->trace_svc),
+                (unsigned long long)atomic_load(&t->trace_wait[0]),(unsigned long long)atomic_load(&t->trace_wait[1]),
+                (unsigned long long)atomic_load(&t->trace_wait[2]),(unsigned long long)atomic_load(&t->trace_wait[3]));
+            for(unsigned i=0;i<8;i++) fprintf(stderr,"%s%llx",i?",":"",(unsigned long long)atomic_load(&t->trace_frames[i]));
+            fputc('\n',stderr);
+        }
+    }
     pthread_mutex_unlock(&lock);
 }
 
@@ -304,6 +343,16 @@ done:
 }
 
 bool threads_svc(unsigned number, uint64_t *r) {
+    if(current) atomic_store(&recent[current->identifier%128].svc,number);
+    if(current && trace_waits && (number==0x1c || number==0x18 || number==0x1a)) {
+        atomic_store(&current->trace_svc,number);
+        for(unsigned i=0;i<4;i++) atomic_store(&current->trace_wait[i],r[i]);
+        uint64_t fp=r[29];
+        for(unsigned i=0;i<8;i++) {
+            uint64_t frame[2]={0}; if(fp && !(fp&15)) host_read(frame,fp,sizeof frame);
+            atomic_store(&current->trace_frames[i],frame[1]); fp=frame[0];
+        }
+    }
     if (number == 0x08) {
         if ((r[1] & 3) || !rt_find_function(r[1]) || !kernel_access(r[1], 4, 5) ||
             (r[3] & 15) || r[3] < 16 || !kernel_access(r[3] - 16, 16, 3)) { r[0] = BAD_ADDRESS; return true; }

@@ -14,7 +14,7 @@ from build_shaders import chain
 
 GFX = ROOT / 'runtime/graphics'
 OUTPUT = ROOT / 'work/graphics'
-SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'movie.c', 'movie_video.c', 'frontend.m', 'shader_prep.m', 'render_prep.m', 'performance.c', 'gamepad.m', 'control_panel.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
+SOURCES = ('bridge.c', 'display.c', 'input.c', 'codec.c', 'movie.c', 'movie_video.c', 'movie_audio.c', 'frontend.m', 'shader_prep.m', 'render_prep.m', 'performance.c', 'gamepad.m', 'control_panel.m', 'nvn/hle_nvn.c', 'nvn/nvn_names.c', 'nvn/nvn_mtl.m',
            'nvn/nvn_refl.m', 'nvn/nvn_tex.c', 'tex/nvn_fmt_mtl.c', 'tex/nvn_bcdec.c',
            'tex/nvn_deswizzle.c', 'tex/nvn_deswizzle_gpu.m', 'include/nvn_dirty.c',
            'include/timeline.c', 'include/trace_writer.c')
@@ -57,7 +57,7 @@ def build(exefs):
     generated = OUTPUT / 'nvn_bridge.c'
     generated.write_text(bridge)
     flags = ['-std=gnu11', '-O2', '-flto=thin', '-g0', '-fno-strict-aliasing', '-fobjc-arc', '-Wno-deprecated-declarations']
-    flags += shlex.split(subprocess.check_output(['pkg-config', '--cflags', 'vpx'], text=True, timeout=10))
+    flags += shlex.split(subprocess.check_output(['pkg-config', '--cflags', 'vpx', 'vorbis'], text=True, timeout=10))
     includes = [ROOT / 'runtime', VENDOR / 'runtime', GFX, GFX / 'include', GFX / 'nvn',
                 HEADERS, HEADERS / 'include', OUTPUT / 'include', ROOT / 'third_party/zelda-mobile/core/third_party/bcdec']
     for path in includes: flags += ['-I', str(path)]
@@ -89,4 +89,4 @@ def build(exefs):
 def link_flags():
     return shlex.split('-flto=thin -framework Cocoa -framework QuartzCore -framework CoreVideo -framework Metal '
                        '-framework MetalFX -framework ImageIO -framework UniformTypeIdentifiers -framework GameController') + shlex.split(
-                           subprocess.check_output(['pkg-config', '--libs', 'vpx'], text=True, timeout=10))
+                           subprocess.check_output(['pkg-config', '--libs', 'vpx', 'vorbis'], text=True, timeout=10))

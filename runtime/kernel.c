@@ -11,14 +11,11 @@ bool kernel_handle_fault(void *address, int write, void *context) {
     return hook && hook(address, write, context);
 }
 #include "threads.h"
+#include "host.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <time.h>
 #include <stdatomic.h>
@@ -145,22 +142,21 @@ static struct memory_info query_memory(uint64_t address) {
 int kernel_init(const LoadedImage *image, uint64_t stack_base, size_t stack_size, uint32_t *main_handle) {
     modules = image;
     // Horizon exposes four process-lifetime values, not a fresh stream per call.
-    arc4random_buf(entropy, sizeof entropy);
+    if (!host_random(entropy, sizeof entropy)) return LOAD_INVALID;
     // Keep alias, stack and heap disjoint; reservation consumes virtual addresses, not physical memory.
-    // macOS can reserve large low-address holes; ask for a free range above them without replacing mappings.
-    mach_vm_address_t address = 0x7000000000ull;
     const uint64_t alignment = 0x200000;
-    kern_return_t result = mach_vm_allocate(mach_task_self(), &address, RESERVE + alignment, VM_FLAGS_ANYWHERE);
-    if (result != KERN_SUCCESS) return result == KERN_NO_SPACE ? LOAD_ADDRESS_UNAVAILABLE : LOAD_INVALID;
+    reservation = host_reserve_guest(RESERVE + alignment);
+    if (!reservation) return LOAD_ADDRESS_UNAVAILABLE;
+    uint64_t address = (uintptr_t)reservation;
     uint64_t aligned = (address + alignment - 1) & ~(alignment - 1);
     if (aligned > (1ull << 39) - RESERVE) {
-        mach_vm_deallocate(mach_task_self(), address, RESERVE + alignment);
+        host_release(reservation, RESERVE + alignment);
+        reservation = NULL;
         return LOAD_ADDRESS_UNAVAILABLE;
     }
-    reservation = (void *)(uintptr_t)address;
     space = (void *)(uintptr_t)aligned;
-    if (mprotect(reservation, RESERVE + alignment, PROT_NONE) || mprotect(space, 0x4000, PROT_READ | PROT_WRITE)) {
-        mach_vm_deallocate(mach_task_self(), address, RESERVE + alignment);
+    if (host_protect(space, 0x4000, 3)) {
+        host_release(reservation, RESERVE + alignment);
         reservation = space = NULL;
         return LOAD_INVALID;
     }
@@ -173,7 +169,7 @@ int kernel_init(const LoadedImage *image, uint64_t stack_base, size_t stack_size
 
 void kernel_destroy(void) {
     if (!threads_destroy()) return;
-    if (reservation) munmap(reservation, RESERVE + 0x200000);
+    if (reservation) host_release(reservation, RESERVE + 0x200000);
     reservation = space = NULL;
     heap_size = 0;
     tls_used = 0;
@@ -196,7 +192,7 @@ uint64_t kernel_thread_local(void) {
     // shortcut: TLS slots live until process teardown; add reuse before supporting long sessions with thread churn.
     if (tls_used + 0x8000 <= ALIAS_OFFSET) {
         unsigned char *page = space + 0x4000 + tls_used;
-        if (!mprotect(page, 0x4000, PROT_READ | PROT_WRITE)) {
+        if (!host_protect(page, 0x4000, 3)) {
             memset(page, 0, 0x4000);
             address = (uintptr_t)page;
             tls_used += 0x4000;
@@ -239,7 +235,7 @@ bool kernel_access(uint64_t address, size_t size, unsigned permissions) {
 }
 
 static bool readonly_overlap(uint64_t lo, uint64_t hi) {
-    size_t page = getpagesize();
+    size_t page = host_page_size();
     for (size_t i = 0; i < 16; i++) if (readonly_maps[i].handle) {
         uint64_t base = readonly_maps[i].address & ~(uint64_t)(page - 1);
         uint64_t end = (readonly_maps[i].address + readonly_maps[i].size + page - 1) & ~(uint64_t)(page - 1);
@@ -309,14 +305,13 @@ static bool memory_svc(unsigned number, uint64_t *r) {
         protections[nprotections - 1].size = size;
         protections[nprotections - 1].permission = permission;
         protections[nprotections - 1].attribute = 0;
-        size_t host_page = getpagesize();
+        size_t host_page = host_page_size();
         uint64_t lo = address & ~(uint64_t)(host_page - 1), hi = (address + size + host_page - 1) & ~(uint64_t)(host_page - 1);
         for (uint64_t page = lo; page < hi; page += host_page) {
             unsigned host_permission = 0;
             for (uint64_t sub = page; sub < page + host_page; sub += PAGE) host_permission |= query_memory(sub).permission;
             // shortcut: mixed 4-KiB permissions share a 16-KiB host page; isolate them with a different memory backend.
-            int prot = (host_permission & 1 ? PROT_READ : 0) | (host_permission & 2 ? PROT_WRITE : 0) | (host_permission & 4 ? PROT_EXEC : 0);
-            if (mprotect((void *)page, host_page, prot)) { perror("protect module data"); abort(); }
+            if (host_protect((void *)page, host_page, host_permission & 3)) { perror("protect module data"); abort(); }
         }
         r[0] = 0; return true;
     }
@@ -328,7 +323,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
             if (growth > MEMORY_LIMIT - SYSTEM_RESERVE - used_memory) { r[0] = 0x10801; return true; }
             struct memory_info info = query_memory(base + heap_size);
             if (info.state || growth > info.size - (base + heap_size - info.base)) { r[0] = 0xd401; return true; }
-            if (mprotect((void *)(base + heap_size), growth, PROT_READ | PROT_WRITE)) { r[0] = 0xd001; return true; }
+            if (host_protect((void *)(base + heap_size), growth, 3)) { r[0] = 0xd001; return true; }
             used_memory += growth;
         } else if (size < heap_size) {
             for (size_t i = 0; i < 16; i++) if (transfers[i].handle && transfers[i].address < base + heap_size && base + size < transfers[i].address + transfers[i].size) {
@@ -339,8 +334,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
                 r[0] = 0xd401; return true;
             }
             // Replace only our released reservation so regrowth is zero-filled without touching gigabytes.
-            if (mmap((void *)(base + size), heap_size - size, PROT_NONE,
-                     MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0) == MAP_FAILED) { r[0] = 0xd001; return true; }
+            if (host_discard((void *)(base + size), heap_size - size)) { r[0] = 0xd001; return true; }
             used_memory -= heap_size - size;
         }
         heap_size = size; r[0] = 0; r[1] = base; return true;
@@ -358,7 +352,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
         if (address % PAGE) { r[0] = 0xcc01; return true; }
         if (r[2] != size) { r[0] = 0xca01; return true; }
         if (address < base || address - base > RESERVE - size) { r[0] = 0xdc01; return true; }
-        size_t host_page = getpagesize();
+        size_t host_page = host_page_size();
         uint64_t lo = address & ~(uint64_t)(host_page - 1);
         uint64_t hi = (address + size + host_page - 1) & ~(uint64_t)(host_page - 1);
         if (number == 0x13) {
@@ -373,9 +367,9 @@ static bool memory_svc(unsigned number, uint64_t *r) {
             size_t slot = 0; while (slot < 16 && readonly_maps[slot].handle) slot++;
             if (slot == 16) { r[0] = 0xce01; return true; }
             // shortcut: immutable clocks/fonts use snapshots; mutable devices need shared backing.
-            if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) { r[0] = 0xd001; return true; }
+            if (host_protect((void *)lo, hi - lo, 3)) { r[0] = 0xd001; return true; }
             memcpy((void *)address, readonly_pages[index].data, size);
-            if (mprotect((void *)lo, hi - lo, PROT_READ)) { perror("protect shared memory"); abort(); }
+            if (host_protect((void *)lo, hi - lo, 1)) { perror("protect shared memory"); abort(); }
             readonly_maps[slot].handle = (uint32_t)r[0]; readonly_maps[slot].address = address;
             readonly_maps[slot].size = size;
         } else {
@@ -384,7 +378,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
             if (slot == 16) { r[0] = 0xd401; return true; }
             readonly_maps[slot].handle = 0;
             for (uint64_t page = lo; page < hi; page += host_page)
-                if (!readonly_overlap(page, page + host_page) && (mprotect((void *)page, host_page, PROT_NONE) || madvise((void *)page, host_page, MADV_FREE))) {
+                if (!readonly_overlap(page, page + host_page) && host_discard((void *)page, host_page)) {
                     perror("release shared memory"); abort();
                 }
         }
@@ -397,7 +391,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
         if (dst < base || dst - base >= STACK_SIZE || size > STACK_SIZE - (dst - base)) {
             r[0] = 0xdc01; return true;
         }
-        size_t host_page = getpagesize();
+        size_t host_page = host_page_size();
         uint64_t lo = dst & ~(uint64_t)(host_page - 1), hi = (dst + size + host_page - 1) & ~(uint64_t)(host_page - 1);
         if (readonly_overlap(lo, hi)) { r[0] = 0xd401; return true; }
         if (number == 0x04) {
@@ -412,9 +406,8 @@ static bool memory_svc(unsigned number, uint64_t *r) {
                 if (src < m->source + m->size && m->source < src + size) { r[0] = 0xd401; return true; }
             }
             if (!slot) { r[0] = 0xce01; return true; }
-            if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) { r[0] = 0xd001; return true; }
-            mach_vm_size_t copied = 0;
-            if (mach_vm_read_overwrite(mach_task_self(), src, size, dst, &copied) || copied != size) {
+            if (host_protect((void *)lo, hi - lo, 3)) { r[0] = 0xd001; return true; }
+            if (!host_read((void *)dst, src, size)) {
                 fputs("stack source changed during mapping\n", stderr); abort();
             }
             // shortcut: copy-back models stack ownership; 4-KiB source isolation needs a different memory backend.
@@ -423,7 +416,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
             struct stack_mapping *slot = NULL;
             for (size_t i = 0; i < 64; i++) if (stacks[i].destination == dst && stacks[i].source == src && stacks[i].size == size) slot = &stacks[i];
             if (!slot) { r[0] = 0xd401; return true; }
-            if (mach_vm_write(mach_task_self(), src, (vm_offset_t)dst, (mach_msg_type_number_t)size)) {
+            if (!host_write(src, (void *)dst, size)) {
                 fputs("stack source changed during unmapping\n", stderr); abort();
             }
             memset(slot, 0, sizeof *slot);
@@ -431,7 +424,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
                 bool live = false;
                 for (size_t i = 0; i < 64; i++) if (stacks[i].size)
                     live |= page < stacks[i].destination + stacks[i].size && stacks[i].destination < page + host_page;
-                if (!live && (mprotect((void *)page, host_page, PROT_NONE) || madvise((void *)page, host_page, MADV_FREE))) {
+                if (!live && host_discard((void *)page, host_page)) {
                     perror("release guest stack"); abort();
                 }
             }
@@ -451,12 +444,12 @@ static bool memory_svc(unsigned number, uint64_t *r) {
         }
         size_t first = (address - base) / PAGE, count = size / PAGE, changed = 0;
         for (size_t i = first; i < first + count; i++) changed += number == 0x2c ? !alias_pages[i] : alias_pages[i];
-        size_t host_page = (size_t)getpagesize();
+        size_t host_page = host_page_size();
         uint64_t lo = address & ~(uint64_t)(host_page - 1), hi = (address + size + host_page - 1) & ~(uint64_t)(host_page - 1);
         if (readonly_overlap(lo, hi)) { r[0] = 0xd401; return true; }
         if (number == 0x2c) {
             if (changed * PAGE > MEMORY_LIMIT - SYSTEM_RESERVE - used_memory) { r[0] = 0x10801; return true; }
-            if (mprotect((void *)lo, hi - lo, PROT_READ | PROT_WRITE)) { r[0] = 0xd001; return true; }
+            if (host_protect((void *)lo, hi - lo, 3)) { r[0] = 0xd001; return true; }
             for (size_t i = first; i < first + count; i++) if (!alias_pages[i]) {
                 memset((void *)(base + i * PAGE), 0, PAGE);
                 alias_pages[i] = 1;
@@ -469,7 +462,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
             for (uint64_t page = lo; page < hi; page += host_page) {
                 bool live = false;
                 for (size_t i = (page - base) / PAGE; i < (page - base + host_page) / PAGE; i++) live |= alias_pages[i];
-                if (!live && (mprotect((void *)page, host_page, PROT_NONE) || madvise((void *)page, host_page, MADV_FREE))) {
+                if (!live && host_discard((void *)page, host_page)) {
                     perror("release guest page"); exit(1);
                 }
             }
@@ -480,7 +473,7 @@ static bool memory_svc(unsigned number, uint64_t *r) {
     if (number == 0x06) {
         struct memory_info info = query_memory(r[2]);
         // The kernel must reject invalid output pointers instead of faulting in memcpy.
-        r[0] = mach_vm_write(mach_task_self(), r[0], (vm_offset_t)&info, sizeof info) == KERN_SUCCESS ? 0 : 0xe601;
+        r[0] = host_write(r[0], &info, sizeof info) ? 0 : 0xe601;
         r[1] = 0;
         return true;
     }

@@ -61,8 +61,14 @@ the synthetic movie tests, adapt the pinned Zelda-Mobile Apache-2.0 decoder.
 The local bridge uses compiled `Cpu` callbacks and guest allocations for SDK
 thread objects and input buffers. The graphics host links separately installed
 [libvpx](https://chromium.googlesource.com/webm/libvpx/+/refs/heads/main/LICENSE)
-(BSD 3-clause; validation environment 1.17.0) for VP8/VP9 decoding to NV12.
-Its source and binaries are not vendored; tests generate their own video frames.
+(BSD 3-clause; macOS validation environment 1.17.0; optional Windows build
+pinned to 1.16.0) for VP8/VP9 decoding to NV12 or RGBA8.
+`runtime/graphics/movie_audio.*` is original MIT code using separately installed
+[Xiph Vorbis and Ogg](https://xiph.org/downloads/) (BSD 3-clause; optional Windows
+builds pinned to libvorbis 1.3.7 and libogg 1.3.6). The bootstrap checks official
+archive digests and retains upstream COPYING files under ignored `work/`.
+These sources and binaries are not vendored; tests synthesize their own video
+and six-channel audio. The Metal build resolves vpx and vorbis with pkg-config.
 
 The frame statistics and GameController adapter in `runtime/graphics/performance.c`
 and `gamepad.m` adapt the same pinned Zelda-Mobile host sources under Apache-2.0.
@@ -82,6 +88,11 @@ entry trampolines and game-derived builtin shaders are excluded. CPU calls use
 typed bridges into compiled C, including callbacks. Per-file origins are in
 `third_party/zelda-mobile/SOURCE.json`.
 
+The Windows NVN resource/command subset and state layouts in `runtime/vulkan_*.inc`
+also adapt this MIT graphics subset. `runtime/audio_headless.c` reuses the pinned
+Apache-2.0 voice cursor for silent timing and ownership tracking. Local adaptation
+hashes and notes are recorded alongside the unchanged upstream fingerprints.
+
 The shader tool now includes the same pinned MIT Ryujinx 1.3.2 subset used by
 Zelda-Mobile: `Ryujinx.Graphics.Shader`, `Ryujinx.Common` and `Spv.Generator`.
 Its notice is retained in `third_party/zelda-mobile/core/third_party/ryujinx/LICENSE.txt`.
@@ -92,7 +103,8 @@ SPIRV-Cross is fetched at a pinned commit with its Apache-2.0 notice under
 `work/tools/spirv-cross.LICENSE`; the pinned .NET SDK is installed separately in `work/tools/`.
 
 The container importer adapts Zelda-Mobile's ExeFS/NCZ and RomFS preparation tools
-under Apache-2.0. Its hactool patch derives from SciresM/hactool, ISC; that notice
+under Apache-2.0. Its hactool patch derives from SciresM/hactool, ISC, and includes
+an assembly clobber correction to bundled mbedTLS, Apache-2.0. The hactool notice
 is retained in `third_party/hactool/LICENSE`. The fixed hactool build retains its
 ISC and bundled mbedTLS Apache-2.0 licenses under `work/tools/`. AES uses the
 separately installed `cryptography` 50.0.2 package (Apache-2.0 OR BSD-3-Clause).

@@ -8,9 +8,9 @@ compatibility. Keep detailed game results and user data in local records; see
 ## Dependencies and synthetic checks
 
 Use Python 3.14+, Apple Clang 21, `pkg-config` and `opus`. Graphics/video checks
-also require `libvpx`; graphics tool preparation needs `cmake`, `make` and network
+also require `libvpx` and `libvorbis`; graphics tool preparation needs `cmake`, `make` and network
 access for pinned dependencies. On macOS, host libraries can be installed with
-`brew install pkg-config opus libvpx`.
+`brew install pkg-config opus libvpx libvorbis`.
 
 ```sh
 mkdir -p work/tmp

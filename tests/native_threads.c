@@ -1,14 +1,16 @@
 #include "dispatch.h"
 #include "kernel.h"
 #include "threads.h"
+#include "host.h"
 #include <assert.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdlib.h>
-#include <sys/mman.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 typedef struct {
     atomic_uint mutex, key, address, ready, returned;
@@ -74,15 +76,17 @@ static uint64_t info(unsigned type) {
 
 int main(int argc, char **argv) {
     (void)argv;
+#ifndef _WIN32
     alarm(20);
-    unsigned char *memory = mmap(NULL, 0x20000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    assert(memory != MAP_FAILED);
+#endif
+    unsigned char *memory = host_reserve_guest(0x20000);
+    assert(memory && !host_protect(memory, 0x20000, 3));
     LoadedImage image = {.count = 1, .bytes = 0x10000};
     image.modules[0].header = (LoadHeader){.base = (uintptr_t)memory, .size = 0x10000,
         .text_size = 0x1000, .data_offset = 0x8000, .data_size = 0x8000};
     uint32_t main_handle;
     int initialized = kernel_init(&image, (uintptr_t)memory + 0x10000, 0x10000, &main_handle);
-    if (initialized) { munmap(memory, 0x20000); return initialized; }
+    if (initialized) { host_release(memory, 0x20000); return initialized; }
     if (argc > 1) {
         threads_test_main_quiescent = parked;
         pthread_t host; assert(!pthread_create(&host, NULL, external_stop, NULL));
@@ -132,6 +136,6 @@ int main(int argc, char **argv) {
         r[0] = writer; svc(0x16, r); assert(!r[0]);
     }
     kernel_destroy();
-    munmap(memory, 0x20000);
+    assert(!host_release(memory, 0x20000));
     return 0;
 }
