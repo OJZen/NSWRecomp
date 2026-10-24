@@ -420,8 +420,9 @@ buffers and 16 MiB per buffer. It advances only submitted samples while started;
 Stop preserves the queue and Flush releases stopped buffers. IPC tests cover
 completion events, ordered release, duplicate tags, ranges and cloned sessions.
 
-This mode has no window or swapchain. Missing services and NVN APIs continue to
-stop explicitly. The native hardware probe, shader execution, frame completion
+The preview window requires `-Window`; Vulkan swapchain presentation remains
+unimplemented. Missing services and NVN APIs continue to stop explicitly.
+The native hardware probe, shader execution, frame completion
 and game compatibility are independent claims. Initialization can still stall
 in guest synchronization. See the
 [Vulkan ownership and synchronization contract](graphics.md#windows-vulkan-foundation).
